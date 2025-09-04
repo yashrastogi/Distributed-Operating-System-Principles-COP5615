@@ -83,5 +83,21 @@ For comparison, the other runs show:
 
 ## 4) Largest problem solved
 
-- **Largest N solved to completion:** `N = 1,000,000` (with `k = 4`).  
-- **Batch size used for best run:** `50000`  
+-  **Largest N solved to completion:**  `N = 100,000,000` with `k = 20`.
+
+-  **Batch size used:**  `10000`
+
+**Exact console output (run command and output):**
+
+```
+$ time gleam run 100000000 20 10000
+
+Compiled in 0.02s
+Running first.main
+
+Number of chunks: 10000
+src/first.gleam:45
+[62780852, 88700958]
+
+gleam run 100000000 20 10000 19.85s user 2.59s system 253% cpu 8.857 total
+```
