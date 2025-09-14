@@ -8,20 +8,21 @@ import gleam/io
 import gleam/list
 import gleam/otp/actor
 import gleam/result
+import gleam/set
 
 const long_wait_time = 100_000
 
-const actor_count = 9
+const actor_count = 8
 
 const convergence_threshold = 10
 
-const gossip_threshold = 1
+const gossip_threshold = 2
 
 pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
 
   let ts1 = birl.now()
-  let subjects = create_actors(actor_count, "3d")
+  let subjects = create_actors(actor_count, "imp3d")
   let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
 
   // Start the gossip - just send the rumor content
@@ -43,10 +44,10 @@ fn line_sub(
 ) {
   case count > 0 {
     True -> {
+      let assert Ok(first_sub) = subjects |> list.first
+      let subjects = list.drop(subjects, 1)
       case count == 1 {
         False -> {
-          let assert Ok(first_sub) = subjects |> list.first
-          let subjects = list.drop(subjects, 1)
           let assert Ok(second_sub) = subjects |> list.first
           let temp = list.append(temp, [first_sub, second_sub])
           actor.call(
@@ -58,8 +59,6 @@ fn line_sub(
         }
 
         True -> {
-          let assert Ok(first_sub) = subjects |> list.first
-          let subjects = list.drop(subjects, 1)
           let temp = list.append(temp, [first_sub])
           let temp = list.drop(temp, int.max(list.length(temp) - 2, 0))
           actor.call(
@@ -78,7 +77,7 @@ fn line_sub(
   }
 }
 
-fn three_d_sub(subjects: List(Subject(ActorMessage))) {
+fn three_d_sub(subjects: List(Subject(ActorMessage)), setup: String) {
   let side =
     float.power(int.to_float(actor_count), 1.0 /. 3.0)
     |> result.unwrap(0.0)
@@ -151,6 +150,21 @@ fn three_d_sub(subjects: List(Subject(ActorMessage))) {
         },
         sub_nei,
       )
+    let sub_nei =
+      list.append(sub_nei, case setup {
+        "imperfect" -> {
+          let sub_nei_set = set.from_list(sub_nei)
+          let assert Ok(rand_sub) =
+            subjects
+            |> list.filter(fn(sub) { !set.contains(sub_nei_set, sub) })
+            |> list.sample(1)
+            |> list.first
+          [rand_sub]
+        }
+        _ -> {
+          []
+        }
+      })
     actor.call(
       sub,
       sending: fn(reply_box) { StoreSubjects(sub_nei, reply_box) },
@@ -192,7 +206,11 @@ pub fn create_actors(
     }
 
     "3d" -> {
-      three_d_sub(subjects)
+      three_d_sub(subjects, "perfect")
+    }
+
+    "imp3d" -> {
+      three_d_sub(subjects, "imperfect")
     }
 
     _ -> {
