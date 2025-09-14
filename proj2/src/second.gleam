@@ -1,14 +1,17 @@
 import birl
 import birl/duration
+import gleam/dict
 import gleam/erlang/process.{type Subject}
+import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/otp/actor
+import gleam/result
 
 const long_wait_time = 100_000
 
-const actor_count = 100
+const actor_count = 9
 
 const convergence_threshold = 10
 
@@ -18,14 +21,14 @@ pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
 
   let ts1 = birl.now()
-  let subjects = create_actors(actor_count)
+  let subjects = create_actors(actor_count, "3d")
   let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
 
   // Start the gossip - just send the rumor content
   actor.send(random_sub, ReceiveRumor(rumor))
 
   // Wait for propagation to complete
-  process.sleep(2000)
+  process.sleep(9000)
 
   let ts2 = birl.now()
   echo birl.difference(ts2, ts1) |> duration.decompose()
@@ -33,7 +36,134 @@ pub fn main() -> Nil {
   Nil
 }
 
-pub fn create_actors(count: Int) -> List(Subject(ActorMessage)) {
+fn line_sub(
+  count: Int,
+  subjects: List(Subject(ActorMessage)),
+  temp: List(Subject(ActorMessage)),
+) {
+  case count > 0 {
+    True -> {
+      case count == 1 {
+        False -> {
+          let assert Ok(first_sub) = subjects |> list.first
+          let subjects = list.drop(subjects, 1)
+          let assert Ok(second_sub) = subjects |> list.first
+          let temp = list.append(temp, [first_sub, second_sub])
+          actor.call(
+            first_sub,
+            sending: fn(reply_box) { StoreSubjects(temp, reply_box) },
+            waiting: long_wait_time,
+          )
+          line_sub(count - 1, subjects, [first_sub])
+        }
+
+        True -> {
+          let assert Ok(first_sub) = subjects |> list.first
+          let subjects = list.drop(subjects, 1)
+          let temp = list.append(temp, [first_sub])
+          let temp = list.drop(temp, int.max(list.length(temp) - 2, 0))
+          actor.call(
+            first_sub,
+            sending: fn(reply_box) { StoreSubjects(temp, reply_box) },
+            waiting: long_wait_time,
+          )
+          line_sub(count - 1, subjects, temp)
+        }
+      }
+    }
+
+    False -> {
+      Nil
+    }
+  }
+}
+
+fn three_d_sub(subjects: List(Subject(ActorMessage))) {
+  let side =
+    float.power(int.to_float(actor_count), 1.0 /. 3.0)
+    |> result.unwrap(0.0)
+    |> float.ceiling
+    |> float.round
+
+  // x = i % side
+  // y = (i / side) % side
+  // z = i / (side * side)
+  let mapping_list =
+    list.index_map(subjects, fn(sub, i) {
+      #(#(i % side, { i / side } % side, i / { side * side }), sub)
+    })
+  let mapping_dict = dict.from_list(mapping_list)
+  list.each(mapping_list, fn(tuple) {
+    let coord = tuple.0
+    let sub = tuple.1
+    let sub_nei = []
+    let n1 = #(coord.0 - 1, coord.1, coord.2)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n1) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    let n2 = #(coord.0 + 1, coord.1, coord.2)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n2) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    let n3 = #(coord.0, coord.1 - 1, coord.2)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n3) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    let n4 = #(coord.0, coord.1 + 1, coord.2)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n4) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    let n5 = #(coord.0, coord.1, coord.2 - 1)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n5) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    let n6 = #(coord.0, coord.1, coord.2 + 1)
+    let sub_nei =
+      list.append(
+        case mapping_dict |> dict.get(n6) {
+          Ok(sub) -> [sub]
+          Error(_) -> []
+        },
+        sub_nei,
+      )
+    actor.call(
+      sub,
+      sending: fn(reply_box) { StoreSubjects(sub_nei, reply_box) },
+      waiting: long_wait_time,
+    )
+  })
+  Nil
+}
+
+pub fn create_actors(
+  count: Int,
+  topology: String,
+) -> List(Subject(ActorMessage)) {
   // Create actors and store their subjects
   let subjects =
     list.range(1, count)
@@ -56,14 +186,26 @@ pub fn create_actors(count: Int) -> List(Subject(ActorMessage)) {
       actor.data
     })
 
-  // Propagate list of all subjects to all actors
-  list.each(subjects, fn(sub) {
-    actor.call(
-      sub,
-      sending: fn(reply_box) { StoreSubjects(subjects, reply_box) },
-      waiting: long_wait_time,
-    )
-  })
+  case topology {
+    "line" -> {
+      line_sub(actor_count, subjects, [])
+    }
+
+    "3d" -> {
+      three_d_sub(subjects)
+    }
+
+    _ -> {
+      // Propagate list of all subjects to all actors
+      list.each(subjects, fn(sub) {
+        actor.call(
+          sub,
+          sending: fn(reply_box) { StoreSubjects(subjects, reply_box) },
+          waiting: long_wait_time,
+        )
+      })
+    }
+  }
 
   io.println(
     "Created and initialized "
@@ -110,6 +252,13 @@ pub fn handle_message(
           state.actor_index,
           state.self_subject,
         )
+      io.println(
+        "Actor "
+        <> state.actor_index |> int.to_string
+        <> " has "
+        <> list.length(subjects) |> int.to_string,
+      )
+      list.each(state.subjects, fn(sub) { actor.send(sub, PrintIndex) })
       actor.send(reply_to, True)
       actor.continue(new_state)
     }
@@ -148,6 +297,7 @@ pub fn handle_message(
 
           // Gossip to a few random neighbors
           let gossip_targets = list.sample(other_actors, gossip_threshold)
+          // echo list.length(gossip_targets)
 
           list.each(gossip_targets, fn(target) {
             actor.send(target, ReceiveRumor(rumor_content))
@@ -165,7 +315,7 @@ pub fn handle_message(
 
         False -> {
           io.println(
-            "Actor " <> int.to_string(state.actor_index) <> " not propogating",
+            "Actor " <> int.to_string(state.actor_index) <> " converged already",
           )
           actor.stop()
         }
