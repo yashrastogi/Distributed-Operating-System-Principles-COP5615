@@ -12,24 +12,31 @@ import gleam/set
 
 const long_wait_time = 100_000
 
-const actor_count = 8
+const actor_count = 5
 
-const convergence_threshold = 10
+const convergence_threshold = 2
 
-const gossip_threshold = 2
+const gossip_threshold = 1
 
 pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
 
-  let ts1 = birl.now()
-  let subjects = create_actors(actor_count, "imp3d")
+  let subjects = create_actors(actor_count, "line")
+  let algorithm = "push-sum"
   let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
-
-  // Start the gossip - just send the rumor content
-  actor.send(random_sub, ReceiveRumor(rumor))
+  let ts1 = birl.now()
+  case algorithm {
+    // Start the gossip
+    "push-sum" -> {
+      actor.send(random_sub, PushSum)
+    }
+    _ -> {
+      actor.send(random_sub, ReceiveRumor(rumor))
+    }
+  }
 
   // Wait for propagation to complete
-  process.sleep(9000)
+  process.sleep(1)
 
   let ts2 = birl.now()
   echo birl.difference(ts2, ts1) |> duration.decompose()
@@ -38,42 +45,35 @@ pub fn main() -> Nil {
 }
 
 fn line_sub(
-  count: Int,
   subjects: List(Subject(ActorMessage)),
   temp: List(Subject(ActorMessage)),
 ) {
+  let count = list.length(subjects)
   case count > 0 {
     True -> {
       let assert Ok(first_sub) = subjects |> list.first
       let subjects = list.drop(subjects, 1)
-      case count == 1 {
-        False -> {
-          let assert Ok(second_sub) = subjects |> list.first
-          let temp = list.append(temp, [first_sub, second_sub])
-          actor.call(
-            first_sub,
-            sending: fn(reply_box) { StoreSubjects(temp, reply_box) },
-            waiting: long_wait_time,
-          )
-          line_sub(count - 1, subjects, [first_sub])
+      let temp = list.append(temp, [first_sub])
+      let temp = case count {
+        1 -> {
+          temp
+          |> list.drop(int.max(list.length(temp) - 2, 0))
         }
 
-        True -> {
-          let temp = list.append(temp, [first_sub])
-          let temp = list.drop(temp, int.max(list.length(temp) - 2, 0))
-          actor.call(
-            first_sub,
-            sending: fn(reply_box) { StoreSubjects(temp, reply_box) },
-            waiting: long_wait_time,
-          )
-          line_sub(count - 1, subjects, temp)
+        _ -> {
+          let assert Ok(second_sub) = subjects |> list.first
+          list.append(temp, [second_sub])
         }
       }
+      actor.call(
+        first_sub,
+        sending: fn(reply_box) { StoreSubjects(temp, reply_box) },
+        waiting: long_wait_time,
+      )
+      line_sub(subjects, [first_sub])
     }
 
-    False -> {
-      Nil
-    }
+    _ -> Nil
   }
 }
 
@@ -190,6 +190,8 @@ pub fn create_actors(
             rumor_count: 0,
             actor_index: i,
             self_subject: self_sub,
+            sum: i |> int.to_float,
+            weight: 1.0,
           )
           |> actor.initialised
           |> actor.returning(self_sub)
@@ -202,7 +204,7 @@ pub fn create_actors(
 
   case topology {
     "line" -> {
-      line_sub(actor_count, subjects, [])
+      line_sub(subjects, [])
     }
 
     "3d" -> {
@@ -236,16 +238,21 @@ pub fn create_actors(
 
 pub type ActorMessage {
   StoreSubjects(subjects: List(Subject(ActorMessage)), reply_box: Subject(Bool))
-  ReceiveRumor(String)
+  ReceiveRumor(rumor: String)
+  ReceiveSumPair(s: Float, w: Float)
   PrintIndex
+  PushSum
 }
 
 pub type ActorState {
   ActorState(
     subjects: List(Subject(ActorMessage)),
+    // Asynchronous Gossip - Information Propogation
     rumor_content: String,
     rumor_count: Int,
-    // Internal count of how many times heard
+    // Asynchronous Gossip - Push Sum
+    sum: Float,
+    weight: Float,
     actor_index: Int,
     self_subject: Subject(ActorMessage),
   )
@@ -256,6 +263,98 @@ pub fn handle_message(
   message: ActorMessage,
 ) -> actor.Next(ActorState, ActorMessage) {
   case message {
+    PushSum -> {
+      // One time command to start push sum received from main
+      // Select random neighbors to gossip to (exclude self)
+      let other_actors =
+        state.subjects
+        |> list.filter(fn(sub) { sub != state.self_subject })
+
+      // Gossip to a random neighbor
+      let gossip_targets = list.sample(other_actors, 1)
+
+      let new_state =
+        ActorState(
+          state.subjects,
+          state.rumor_content,
+          state.rumor_count,
+          state.sum /. 2.0,
+          state.weight /. 2.0,
+          state.actor_index,
+          state.self_subject,
+        )
+
+      list.each(gossip_targets, fn(target) {
+        actor.send(
+          target,
+          ReceiveSumPair(
+            state.sum -. new_state.sum,
+            state.weight -. new_state.weight,
+          ),
+        )
+      })
+
+      actor.continue(new_state)
+    }
+
+    ReceiveSumPair(s, w) -> {
+      // io.println(
+      //   "Actor "
+      //   <> int.to_string(state.actor_index)
+      //   <> " received pair ("
+      //   <> float.to_string(s)
+      //   <> ", "
+      //   <> float.to_string(w)
+      //   <> ")",
+      // )
+
+      // Receive: Messages sent and received are pairs of the form (s, w). Upon
+      // receiving, an actor adds the received pair to its own corresponding val-
+      // ues. After receiving, each actor selects a random neighbor and sends it a
+      // message.
+
+      let new_sum = state.sum +. s
+      let new_weight = state.weight +. w
+
+      // Select random neighbors to gossip to (exclude self)
+      let other_actors =
+        state.subjects
+        |> list.filter(fn(sub) { sub != state.self_subject })
+
+      // Gossip to a random neighbor
+      let gossip_targets = list.sample(other_actors, 1)
+
+      let new_state =
+        ActorState(
+          state.subjects,
+          state.rumor_content,
+          state.rumor_count,
+          new_sum /. 2.0,
+          new_weight /. 2.0,
+          state.actor_index,
+          state.self_subject,
+        )
+
+      list.each(gossip_targets, fn(target) {
+        actor.send(
+          target,
+          ReceiveSumPair(
+            new_sum -. new_state.sum,
+            new_weight -. new_state.weight,
+          ),
+        )
+      })
+
+      io.println(
+        "s/w ratio of actor "
+        <> state.actor_index |> int.to_string
+        <> ": "
+        <> { state.sum /. state.weight } |> float.to_string,
+      )
+
+      actor.continue(new_state)
+    }
+
     PrintIndex -> {
       io.println("I am actor " <> int.to_string(state.actor_index))
       actor.continue(state)
@@ -267,6 +366,8 @@ pub fn handle_message(
           subjects,
           state.rumor_content,
           state.rumor_count,
+          state.sum,
+          state.weight,
           state.actor_index,
           state.self_subject,
         )
@@ -300,6 +401,8 @@ pub fn handle_message(
           // Store the rumor content
           new_count,
           // Update internal count
+          state.sum,
+          state.weight,
           state.actor_index,
           state.self_subject,
         )
@@ -315,7 +418,6 @@ pub fn handle_message(
 
           // Gossip to a few random neighbors
           let gossip_targets = list.sample(other_actors, gossip_threshold)
-          // echo list.length(gossip_targets)
 
           list.each(gossip_targets, fn(target) {
             actor.send(target, ReceiveRumor(rumor_content))
