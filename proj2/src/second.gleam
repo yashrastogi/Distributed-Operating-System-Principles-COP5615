@@ -13,6 +13,8 @@ import gleam/set
 
 const long_wait_time = 100_000
 
+const short_wait_time = 1000
+
 const push_sum_convergence_threshold = 1.0e-10
 
 const gossip_convergence_threshold = 10
@@ -48,7 +50,7 @@ pub fn parse_args() -> #(Int, String, String) {
 pub fn check_actors_status(subjects: List(Subject(ActorMessage))) {
   case
     list.any(subjects, fn(sub) {
-      actor.call(sub, waiting: long_wait_time, sending: GetStatus)
+      actor.call(sub, waiting: short_wait_time, sending: GetStatus)
     })
   {
     True -> Nil
@@ -84,7 +86,15 @@ pub fn main() -> Nil {
   process.sleep(main_thread_sleep)
 
   let ts2 = birl.now()
-  io.println("\n\nConvergence took:\n")
+  io.println(
+    "\n\nConvergence for "
+    <> actor_count |> int.to_string
+    <> " actors with "
+    <> topology
+    <> " topology and "
+    <> algorithm
+    <> " algorithm took:\n",
+  )
   echo birl.difference(ts2, ts1) |> duration.decompose()
 
   Nil
