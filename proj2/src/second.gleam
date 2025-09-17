@@ -1,3 +1,4 @@
+import argv
 import birl
 import birl/duration
 import gleam/dict
@@ -12,31 +13,57 @@ import gleam/set
 
 const long_wait_time = 100_000
 
-const actor_count = 5
-
-const convergence_threshold = 2
+const convergence_threshold = 10
 
 const gossip_threshold = 1
 
+const actor_sleep = 0
+
+const main_thread_sleep = 100
+
+pub fn parse_args() -> #(Int, String, String) {
+  let args = argv.load().arguments
+  case args {
+    [num_nodes_str, topology, algorithm] -> {
+      case int.parse(num_nodes_str) {
+        Ok(num_nodes) -> {
+          #(num_nodes, topology, algorithm)
+        }
+        Error(_) -> {
+          io.println("Invalid numNodes!")
+          panic
+        }
+      }
+    }
+    _ -> {
+      io.println("Usage: project2 numNodes topology algorithm")
+      panic
+    }
+  }
+}
+
 pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
-
-  let subjects = create_actors(actor_count, "line")
-  let algorithm = "push-sum"
+  let #(actor_count, topology, algorithm) = parse_args()
+  let subjects = create_actors(actor_count, topology)
   let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
+  io.println(
+    "Main thread will sleep for " <> int.to_string(main_thread_sleep) <> "ms",
+  )
   let ts1 = birl.now()
   case algorithm {
-    // Start the gossip
     "push-sum" -> {
       actor.send(random_sub, PushSum)
     }
+
+    // Gossip
     _ -> {
       actor.send(random_sub, ReceiveRumor(rumor))
     }
   }
 
   // Wait for propagation to complete
-  process.sleep(1)
+  process.sleep(main_thread_sleep)
 
   let ts2 = birl.now()
   echo birl.difference(ts2, ts1) |> duration.decompose()
@@ -79,7 +106,7 @@ fn line_sub(
 
 fn three_d_sub(subjects: List(Subject(ActorMessage)), setup: String) {
   let side =
-    float.power(int.to_float(actor_count), 1.0 /. 3.0)
+    float.power(int.to_float(list.length(subjects)), 1.0 /. 3.0)
     |> result.unwrap(0.0)
     |> float.ceiling
     |> float.round
@@ -230,7 +257,9 @@ pub fn create_actors(
   io.println(
     "Created and initialized "
     <> int.to_string(list.length(subjects))
-    <> " actors",
+    <> " actors with "
+    <> topology
+    <> " topology",
   )
 
   subjects
@@ -284,6 +313,8 @@ pub fn handle_message(
           state.self_subject,
         )
 
+      process.sleep(actor_sleep)
+
       list.each(gossip_targets, fn(target) {
         actor.send(
           target,
@@ -335,6 +366,8 @@ pub fn handle_message(
           state.self_subject,
         )
 
+      process.sleep(actor_sleep)
+
       list.each(gossip_targets, fn(target) {
         actor.send(
           target,
@@ -346,7 +379,7 @@ pub fn handle_message(
       })
 
       io.println(
-        "s/w ratio of actor "
+        "s/w of actor "
         <> state.actor_index |> int.to_string
         <> ": "
         <> { state.sum /. state.weight } |> float.to_string,
@@ -375,7 +408,8 @@ pub fn handle_message(
         "Actor "
         <> state.actor_index |> int.to_string
         <> " has "
-        <> list.length(subjects) |> int.to_string,
+        <> { list.length(subjects) } |> int.to_string
+        <> " neighbor(s)",
       )
       list.each(state.subjects, fn(sub) { actor.send(sub, PrintIndex) })
       actor.send(reply_to, True)
@@ -418,6 +452,8 @@ pub fn handle_message(
 
           // Gossip to a few random neighbors
           let gossip_targets = list.sample(other_actors, gossip_threshold)
+
+          process.sleep(actor_sleep)
 
           list.each(gossip_targets, fn(target) {
             actor.send(target, ReceiveRumor(rumor_content))
