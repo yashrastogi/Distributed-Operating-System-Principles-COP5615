@@ -13,13 +13,16 @@ import gleam/set
 
 const long_wait_time = 100_000
 
-const convergence_threshold = 10
+const push_sum_convergence_threshold = 1.0e-10
 
+const gossip_convergence_threshold = 10
+
+// Has to be one! or else push-sum fails
 const gossip_threshold = 1
 
 const actor_sleep = 0
 
-const main_thread_sleep = 100
+const main_thread_sleep = 0
 
 pub fn parse_args() -> #(Int, String, String) {
   let args = argv.load().arguments
@@ -42,9 +45,21 @@ pub fn parse_args() -> #(Int, String, String) {
   }
 }
 
+pub fn check_actors_status(subjects: List(Subject(ActorMessage))) {
+  case
+    list.any(subjects, fn(sub) {
+      actor.call(sub, waiting: long_wait_time, sending: GetStatus)
+    })
+  {
+    True -> Nil
+    False -> check_actors_status(subjects)
+  }
+}
+
 pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
   let #(actor_count, topology, algorithm) = parse_args()
+
   let subjects = create_actors(actor_count, topology)
   let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
   io.println(
@@ -62,10 +77,14 @@ pub fn main() -> Nil {
     }
   }
 
+  // Check status recursively
+  check_actors_status(subjects)
+
   // Wait for propagation to complete
   process.sleep(main_thread_sleep)
 
   let ts2 = birl.now()
+  io.println("\n\nConvergence took:\n")
   echo birl.difference(ts2, ts1) |> duration.decompose()
 
   Nil
@@ -219,6 +238,7 @@ pub fn create_actors(
             self_subject: self_sub,
             sum: i |> int.to_float,
             weight: 1.0,
+            ratio_convergence_streak: 0,
           )
           |> actor.initialised
           |> actor.returning(self_sub)
@@ -271,6 +291,7 @@ pub type ActorMessage {
   ReceiveSumPair(s: Float, w: Float)
   PrintIndex
   PushSum
+  GetStatus(reply_box: Subject(Bool))
 }
 
 pub type ActorState {
@@ -284,6 +305,7 @@ pub type ActorState {
     weight: Float,
     actor_index: Int,
     self_subject: Subject(ActorMessage),
+    ratio_convergence_streak: Int,
   )
 }
 
@@ -311,6 +333,7 @@ pub fn handle_message(
           state.weight /. 2.0,
           state.actor_index,
           state.self_subject,
+          state.ratio_convergence_streak,
         )
 
       process.sleep(actor_sleep)
@@ -329,16 +352,6 @@ pub fn handle_message(
     }
 
     ReceiveSumPair(s, w) -> {
-      // io.println(
-      //   "Actor "
-      //   <> int.to_string(state.actor_index)
-      //   <> " received pair ("
-      //   <> float.to_string(s)
-      //   <> ", "
-      //   <> float.to_string(w)
-      //   <> ")",
-      // )
-
       // Receive: Messages sent and received are pairs of the form (s, w). Upon
       // receiving, an actor adds the received pair to its own corresponding val-
       // ues. After receiving, each actor selects a random neighbor and sends it a
@@ -347,45 +360,82 @@ pub fn handle_message(
       let new_sum = state.sum +. s
       let new_weight = state.weight +. w
 
-      // Select random neighbors to gossip to (exclude self)
-      let other_actors =
-        state.subjects
-        |> list.filter(fn(sub) { sub != state.self_subject })
+      let old_sw_ratio = state.sum /. state.weight
+      let new_sw_ratio = new_sum /. new_weight
+      let new_ratio_convergence_streak = case
+        float.absolute_value(new_sw_ratio -. old_sw_ratio)
+        <. push_sum_convergence_threshold
+      {
+        True -> state.ratio_convergence_streak + 1
+        False -> 0
+      }
 
-      // Gossip to a random neighbor
-      let gossip_targets = list.sample(other_actors, 1)
+      case new_ratio_convergence_streak >= 3 {
+        False -> {
+          // Didn't converge so go on
 
-      let new_state =
-        ActorState(
-          state.subjects,
-          state.rumor_content,
-          state.rumor_count,
-          new_sum /. 2.0,
-          new_weight /. 2.0,
-          state.actor_index,
-          state.self_subject,
-        )
+          // Select random neighbors to gossip to (exclude self)
+          let other_actors =
+            state.subjects
+            |> list.filter(fn(sub) { sub != state.self_subject })
 
-      process.sleep(actor_sleep)
+          // Gossip to random neighbors
+          let gossip_targets = list.sample(other_actors, gossip_threshold)
 
-      list.each(gossip_targets, fn(target) {
-        actor.send(
-          target,
-          ReceiveSumPair(
-            new_sum -. new_state.sum,
-            new_weight -. new_state.weight,
-          ),
-        )
-      })
+          let new_state =
+            ActorState(
+              state.subjects,
+              state.rumor_content,
+              state.rumor_count,
+              new_sum /. 2.0,
+              new_weight /. 2.0,
+              state.actor_index,
+              state.self_subject,
+              new_ratio_convergence_streak,
+            )
 
-      io.println(
-        "s/w of actor "
-        <> state.actor_index |> int.to_string
-        <> ": "
-        <> { state.sum /. state.weight } |> float.to_string,
-      )
+          process.sleep(actor_sleep)
 
-      actor.continue(new_state)
+          list.each(gossip_targets, fn(target) {
+            actor.send(
+              target,
+              ReceiveSumPair(
+                new_sum -. new_state.sum,
+                new_weight -. new_state.weight,
+              ),
+            )
+          })
+
+          io.println(
+            "s/w of actor "
+            <> state.actor_index |> int.to_string
+            <> ": "
+            <> { state.sum /. state.weight } |> float.to_string,
+          )
+          actor.continue(new_state)
+        }
+        True -> {
+          // Converged: stop propogation
+          io.println(
+            "Actor "
+            <> int.to_string(state.actor_index)
+            <> " converged already with s/w ratio: "
+            <> { state.sum /. state.weight } |> float.to_string,
+          )
+          let new_state =
+            ActorState(
+              state.subjects,
+              state.rumor_content,
+              state.rumor_count,
+              state.sum,
+              state.weight,
+              state.actor_index,
+              state.self_subject,
+              new_ratio_convergence_streak,
+            )
+          actor.continue(new_state)
+        }
+      }
     }
 
     PrintIndex -> {
@@ -403,12 +453,13 @@ pub fn handle_message(
           state.weight,
           state.actor_index,
           state.self_subject,
+          state.ratio_convergence_streak,
         )
       io.println(
         "Actor "
         <> state.actor_index |> int.to_string
         <> " has "
-        <> { list.length(subjects) } |> int.to_string
+        <> list.length(subjects) |> int.to_string
         <> " neighbor(s)",
       )
       list.each(state.subjects, fn(sub) { actor.send(sub, PrintIndex) })
@@ -419,15 +470,6 @@ pub fn handle_message(
     ReceiveRumor(rumor_content) -> {
       // Increment this actor's internal count of hearing the rumor
       let new_count = state.rumor_count + 1
-
-      // io.println(
-      //   "Actor "
-      //   <> int.to_string(state.actor_index)
-      //   <> " heard rumor "
-      //   <> int.to_string(new_count)
-      //   <> " times",
-      // )
-
       let new_state =
         ActorState(
           state.subjects,
@@ -439,10 +481,11 @@ pub fn handle_message(
           state.weight,
           state.actor_index,
           state.self_subject,
+          state.ratio_convergence_streak,
         )
 
       // Check if this actor has achieved convergence
-      case new_count < convergence_threshold {
+      case new_count < gossip_convergence_threshold {
         True -> {
           // Haven't converged yet, continue gossiping
           // Select random neighbors to gossip to (exclude self)
@@ -473,9 +516,19 @@ pub fn handle_message(
           io.println(
             "Actor " <> int.to_string(state.actor_index) <> " converged already",
           )
-          actor.stop()
+          // Note: new_state
+          actor.continue(new_state)
         }
       }
+    }
+
+    GetStatus(reply_to) -> {
+      actor.send(
+        reply_to,
+        state.rumor_count >= gossip_convergence_threshold
+          || state.ratio_convergence_streak >= 3,
+      )
+      actor.continue(state)
     }
   }
 }
