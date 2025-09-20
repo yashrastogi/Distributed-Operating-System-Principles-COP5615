@@ -12,9 +12,9 @@ import gleam/result
 import gleam/set
 
 // --- Constants ---
-const long_wait_time = 100_000
+const long_wait_time = 1000
 
-const short_wait_time = 1000
+const short_wait_time = 50
 
 const push_sum_convergence_threshold = 1.0e-10
 
@@ -22,9 +22,12 @@ const gossip_convergence_threshold = 10
 
 const gossip_threshold = 1
 
-const actor_sleep = 0
+const actor_sleep = 1
 
 const main_thread_sleep = 0
+
+// Probability that a node would die each time it sends a message.
+const die_randomly_probability = 0.0
 
 // --- Main Application Logic ---
 
@@ -32,8 +35,9 @@ pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
   let #(actor_count, topology, algorithm) = parse_args()
 
-  let subjects = create_actors(actor_count, topology)
-  let assert Ok(random_sub) = list.sample(subjects, 1) |> list.first
+  let sub_tups = create_actors(actor_count, topology)
+  let assert Ok(random_sub_tup) = list.sample(sub_tups, 1) |> list.first
+  let random_sub = random_sub_tup.0
 
   io.println(
     "Main thread will sleep for " <> int.to_string(main_thread_sleep) <> "ms",
@@ -46,10 +50,16 @@ pub fn main() -> Nil {
   }
 
   // Recursively check until all actors have converged
-  check_actors_status(subjects)
+  check_actors_status(sub_tups)
 
   process.sleep(main_thread_sleep)
+
   let ts2 = birl.now()
+  let duration = birl.difference(ts2, ts1) |> duration.decompose()
+  io.println(
+    "\n\nAlive nodes at end: "
+    <> sub_tups |> list.count(fn(x) { process.is_alive(x.1) }) |> int.to_string,
+  )
   io.println(
     "\n\nConvergence for "
     <> int.to_string(actor_count)
@@ -59,7 +69,8 @@ pub fn main() -> Nil {
     <> algorithm
     <> " algorithm took:\n",
   )
-  echo birl.difference(ts2, ts1) |> duration.decompose()
+  echo duration
+
   Nil
 }
 
@@ -67,7 +78,14 @@ pub fn parse_args() -> #(Int, String, String) {
   case argv.load().arguments {
     [num_nodes_str, topology, algorithm] -> {
       case int.parse(num_nodes_str) {
-        Ok(num_nodes) -> #(num_nodes, topology, algorithm)
+        Ok(num_nodes) ->
+          case num_nodes > 1 {
+            True -> #(num_nodes, topology, algorithm)
+            False -> {
+              io.println("Invalid numNodes!")
+              panic
+            }
+          }
         Error(_) -> {
           io.println("Invalid numNodes!")
           panic
@@ -82,16 +100,23 @@ pub fn parse_args() -> #(Int, String, String) {
 }
 
 /// Recursively polls actors until one reports a converged status.
-pub fn check_actors_status(subjects: List(Subject(ActorMessage))) {
+pub fn check_actors_status(
+  subjects: List(#(Subject(ActorMessage), process.Pid)),
+) {
   // We stop waiting when one actor has converged.
   case
-    list.any(subjects, fn(sub) {
-      actor.call(sub, waiting: short_wait_time, sending: GetStatus)
+    list.any(subjects, fn(tup) {
+      process.is_alive(tup.1)
+      && actor.call(tup.0, waiting: long_wait_time, sending: GetConverged)
     })
   {
     True -> Nil
+
     // One actor returned True, so we're done.
-    False -> check_actors_status(subjects)
+    False -> {
+      process.sleep(short_wait_time)
+      check_actors_status(subjects)
+    }
     // No actor is done, check again.
   }
 }
@@ -101,8 +126,8 @@ pub fn check_actors_status(subjects: List(Subject(ActorMessage))) {
 pub fn create_actors(
   count: Int,
   topology: String,
-) -> List(Subject(ActorMessage)) {
-  let subjects =
+) -> List(#(Subject(ActorMessage), process.Pid)) {
+  let sub_tups =
     list.range(1, count)
     |> list.map(fn(i) {
       let assert Ok(actor) =
@@ -124,16 +149,20 @@ pub fn create_actors(
         })
         |> actor.on_message(handle_message)
         |> actor.start
-      actor.data
+      #(actor.data, actor.pid)
     })
 
+  let subjects = list.map(sub_tups, fn(el) { el.0 })
   // Assign neighbors based on the chosen topology
   case topology {
-    "line" -> setup_line_topology(subjects, [])
-    "3d" -> setup_3d_topology(subjects, False)
-    "imp3d" -> setup_3d_topology(subjects, True)
+    "line" -> setup_line_topology(sub_tups, [])
+    "3d" -> setup_3d_topology(sub_tups, False)
+    "imp3d" -> setup_3d_topology(sub_tups, True)
     // Default to a fully connected (full) topology
-    _ -> list.each(subjects, fn(sub) { assign_neighbors(sub, subjects) })
+    _ ->
+      list.each(subjects, fn(sub) {
+        assign_neighbors(sub, sub_tups |> list.filter(fn(s) { s.0 != sub }))
+      })
   }
 
   io.println(
@@ -143,25 +172,25 @@ pub fn create_actors(
     <> topology
     <> " topology",
   )
-  subjects
+  sub_tups
 }
 
 /// A helper function to send a list of neighbors to an actor.
 fn assign_neighbors(
   subject: Subject(ActorMessage),
-  neighbors: List(Subject(ActorMessage)),
+  neighbors: List(#(Subject(ActorMessage), process.Pid)),
 ) {
   actor.call(
     subject,
-    sending: fn(reply_box) { StoreSubjects(neighbors, reply_box) },
+    sending: fn(reply_box) { StoreNeighbors(neighbors, reply_box) },
     waiting: long_wait_time,
   )
 }
 
 /// Sets up actor neighbors in a line formation (each actor connects to i-1 and i+1).
 pub fn setup_line_topology(
-  subjects: List(Subject(ActorMessage)),
-  prev_subjects: List(Subject(ActorMessage)),
+  subjects: List(#(Subject(ActorMessage), process.Pid)),
+  prev_subjects: List(#(Subject(ActorMessage), process.Pid)),
 ) {
   case subjects {
     [] -> Nil
@@ -170,7 +199,7 @@ pub fn setup_line_topology(
       let next_neighbor = list.take(rest_of_subjects, 1)
       let neighbors = list.append(prev_subjects, next_neighbor)
 
-      assign_neighbors(current_subject, neighbors)
+      assign_neighbors(current_subject.0, neighbors)
 
       setup_line_topology(rest_of_subjects, [current_subject])
     }
@@ -178,7 +207,10 @@ pub fn setup_line_topology(
 }
 
 /// Sets up actor neighbors in a 3D grid, with an option for an imperfect grid.
-fn setup_3d_topology(subjects: List(Subject(ActorMessage)), is_imperfect: Bool) {
+fn setup_3d_topology(
+  subjects: List(#(Subject(ActorMessage), process.Pid)),
+  is_imperfect: Bool,
+) {
   let side =
     list.length(subjects)
     |> int.to_float
@@ -205,7 +237,7 @@ fn setup_3d_topology(subjects: List(Subject(ActorMessage)), is_imperfect: Bool) 
 
   list.each(mapping_list, fn(tuple) {
     let coord = tuple.0
-    let subject = tuple.1
+    let sub_tup = tuple.1
 
     // Find all adjacent neighbors in the grid using the offset list
     let grid_neighbors =
@@ -226,30 +258,34 @@ fn setup_3d_topology(subjects: List(Subject(ActorMessage)), is_imperfect: Bool) 
         let assert Ok(random_neighbor) =
           subjects
           |> list.filter(fn(s) {
-            s != subject && !set.contains(grid_neighbors_set, s)
+            s != sub_tup && !set.contains(grid_neighbors_set, s)
           })
           |> list.sample(1)
           |> list.first
         [random_neighbor, ..grid_neighbors]
       }
     }
-    assign_neighbors(subject, final_neighbors)
+    assign_neighbors(sub_tup.0, final_neighbors)
   })
 }
 
 // --- Actor Types and Message Handler ---
 
 pub type ActorMessage {
-  StoreSubjects(subjects: List(Subject(ActorMessage)), reply_box: Subject(Bool))
+  StoreNeighbors(
+    subjects: List(#(Subject(ActorMessage), process.Pid)),
+    reply_box: Subject(Bool),
+  )
   ReceiveRumor(rumor: String)
   ReceiveSumPair(s: Float, w: Float)
   PushSum
-  GetStatus(reply_box: Subject(Bool))
+  GetConverged(reply_box: Subject(Bool))
+  DeleteNeighbor(neighbor_subject: Subject(ActorMessage))
 }
 
 pub type ActorState {
   ActorState(
-    subjects: List(Subject(ActorMessage)),
+    subjects: List(#(Subject(ActorMessage), process.Pid)),
     rumor_content: String,
     rumor_count: Int,
     sum: Float,
@@ -310,7 +346,7 @@ pub fn handle_message(
             <> " converged with s/w ratio: "
             <> float.to_string(new_sw_ratio),
           )
-          actor.continue(new_state)
+          continue_or_die(new_state)
         }
       }
     }
@@ -335,19 +371,19 @@ pub fn handle_message(
             <> int.to_string(gossip_threshold)
             <> " neighbor(s)",
           )
-          actor.continue(new_state)
+          continue_or_die(new_state)
         }
         True -> {
           io.println(
             "Actor " <> int.to_string(state.actor_index) <> " converged already",
           )
-          actor.continue(new_state)
+          continue_or_die(new_state)
         }
       }
     }
 
     // --- Utility Messages ---
-    StoreSubjects(subjects, reply_to) -> {
+    StoreNeighbors(subjects, reply_to) -> {
       let new_state = ActorState(..state, subjects: subjects)
       io.println(
         "Actor "
@@ -360,14 +396,39 @@ pub fn handle_message(
       actor.continue(new_state)
     }
 
-    GetStatus(reply_to) -> {
+    GetConverged(reply_to) -> {
       actor.send(reply_to, is_converged(state))
       actor.continue(state)
+    }
+
+    DeleteNeighbor(neighbor_subject) -> {
+      let new_state =
+        ActorState(
+          ..state,
+          subjects: list.filter(state.subjects, fn(sub) {
+            sub.0 != neighbor_subject
+          }),
+        )
+      actor.continue(new_state)
     }
   }
 }
 
 // --- Actor Logic Helpers ---
+
+/// Stop the actor randomly based on die_randomly_probability, otherwise continue with passed state.
+fn continue_or_die(state: ActorState) {
+  case float.random() <. die_randomly_probability {
+    True -> {
+      io.println("An actor died :(")
+      // list.each(state.subjects, fn(sub) {
+      //   actor.send(sub.0, DeleteNeighbor(state.self_subject))
+      // })
+      actor.stop()
+    }
+    _ -> actor.continue(state)
+  }
+}
 
 /// Checks if an actor has met the convergence criteria for either algorithm.
 fn is_converged(state: ActorState) -> Bool {
@@ -377,13 +438,16 @@ fn is_converged(state: ActorState) -> Bool {
 
 /// A generic function to send a message to a number of random neighbors.
 fn gossip(state: ActorState, message: ActorMessage, count: Int) -> Nil {
+  // Filter to remove dead neighbors
   let other_actors =
     state.subjects
-    |> list.filter(fn(sub) { sub != state.self_subject })
+    |> list.filter(fn(sub) {
+      sub.0 != state.self_subject && process.is_alive(sub.1)
+    })
 
   let gossip_targets = list.sample(other_actors, count)
   process.sleep(actor_sleep)
-  list.each(gossip_targets, fn(target) { actor.send(target, message) })
+  list.each(gossip_targets, fn(target) { actor.send(target.0, message) })
 }
 
 /// The core logic for push-sum: halve sum/weight, keep one half, send the other.
@@ -400,5 +464,5 @@ fn halve_and_send(state: ActorState) -> actor.Next(ActorState, ActorMessage) {
     )
 
   gossip(state, message_to_send, 1)
-  actor.continue(new_state)
+  continue_or_die(new_state)
 }
