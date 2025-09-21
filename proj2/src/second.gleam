@@ -22,12 +22,15 @@ const gossip_convergence_threshold = 10
 
 const gossip_threshold = 1
 
-const actor_sleep = 1
+const actor_sleep = 0
 
 const main_thread_sleep = 0
 
 // Probability that a node would die each time it sends a message.
 const die_randomly_probability = 0.0
+
+// Percent of actors to kill after creating actors and setting neighbors to create an inconsistent state.
+const kill_percent = 30
 
 // --- Main Application Logic ---
 
@@ -36,7 +39,22 @@ pub fn main() -> Nil {
   let #(actor_count, topology, algorithm) = parse_args()
 
   let sub_tups = create_actors(actor_count, topology)
-  let assert Ok(random_sub_tup) = list.sample(sub_tups, 1) |> list.first
+
+  // Kill kill_percent % of actors
+  sub_tups
+  |> list.sample(float.round(
+    int.to_float({ actor_count * kill_percent }) /. 100.0,
+  ))
+  |> list.each(fn(tup) {
+    actor.call(tup.0, sending: Stop, waiting: short_wait_time)
+  })
+  process.sleep(100)
+
+  let assert Ok(random_sub_tup) =
+    sub_tups
+    |> list.filter(fn(s) { process.is_alive(s.1) })
+    |> list.sample(1)
+    |> list.first
   let random_sub = random_sub_tup.0
 
   io.println(
@@ -110,14 +128,14 @@ pub fn check_actors_status(
       && actor.call(tup.0, waiting: long_wait_time, sending: GetConverged)
     })
   {
+    // One actor returned True, so we're done.
     True -> Nil
 
-    // One actor returned True, so we're done.
+    // No actor is done, check again.
     False -> {
       process.sleep(short_wait_time)
       check_actors_status(subjects)
     }
-    // No actor is done, check again.
   }
 }
 
@@ -281,6 +299,7 @@ pub type ActorMessage {
   PushSum
   GetConverged(reply_box: Subject(Bool))
   DeleteNeighbor(neighbor_subject: Subject(ActorMessage))
+  Stop(sub: Subject(Nil))
 }
 
 pub type ActorState {
@@ -410,6 +429,11 @@ pub fn handle_message(
           }),
         )
       actor.continue(new_state)
+    }
+
+    Stop(s) -> {
+      actor.send(s, Nil)
+      actor.stop()
     }
   }
 }
