@@ -18,7 +18,7 @@ const short_wait_time = 50
 
 const push_sum_convergence_threshold = 1.0e-10
 
-const gossip_convergence_threshold = 10
+const gossip_convergence_threshold = 1000
 
 const gossip_threshold = 1
 
@@ -30,13 +30,14 @@ const main_thread_sleep = 0
 const die_randomly_probability = 0.0
 
 // Percent of actors to kill after creating actors and setting neighbors to create an inconsistent state.
-const kill_percent = 30
+// EDIT: Moved to command line arguments
+// const kill_percent = 30
 
 // --- Main Application Logic ---
 
 pub fn main() -> Nil {
   let rumor = "Mario has a crush on Princess Peach."
-  let #(actor_count, topology, algorithm) = parse_args()
+  let #(actor_count, topology, algorithm, kill_percent) = parse_args()
 
   let sub_tups = create_actors(actor_count, topology)
 
@@ -92,26 +93,15 @@ pub fn main() -> Nil {
   Nil
 }
 
-pub fn parse_args() -> #(Int, String, String) {
+pub fn parse_args() -> #(Int, String, String, Int) {
   case argv.load().arguments {
-    [num_nodes_str, topology, algorithm] -> {
-      case int.parse(num_nodes_str) {
-        Ok(num_nodes) ->
-          case num_nodes > 1 {
-            True -> #(num_nodes, topology, algorithm)
-            False -> {
-              io.println("Invalid numNodes!")
-              panic
-            }
-          }
-        Error(_) -> {
-          io.println("Invalid numNodes!")
-          panic
-        }
-      }
+    [num_nodes_str, topology, algorithm, kill_percent_str] -> {
+      let assert Ok(kill_percent) = kill_percent_str |> int.parse
+      let assert Ok(num_nodes) = num_nodes_str |> int.parse
+      #(num_nodes, topology, algorithm, kill_percent)
     }
     _ -> {
-      io.println("Usage: project2 numNodes topology algorithm")
+      io.println("Usage: project2 numNodes topology algorithm kill_percent")
       panic
     }
   }
