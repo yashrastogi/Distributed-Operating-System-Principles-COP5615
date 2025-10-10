@@ -11,23 +11,27 @@ import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
-import gleam/order.{Eq, Gt, Lt}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 
 // ---------------------------------------------------------------------------
 // Constants — timeouts and sleeps (milliseconds)
 // ---------------------------------------------------------------------------
 
-const long_wait_time = 4000
+const long_wait_time = 2000
 
-const medium_wait_time = 1500
+const medium_wait_time = 50
 
-const short_wait_time = 500
+const short_wait_time = 10
+
+const successor_list_size = 5
+
+const finger_list_size = 3
 
 /// How long the main thread sleeps after starting background actors.
 /// This lets the periodic actors run for a while before the program ends.
-const main_thread_sleep = 3000
+const main_thread_sleep = 5000
 
 // ---------------------------------------------------------------------------
 // Entrypoint
@@ -38,33 +42,63 @@ pub fn main() -> Nil {
   let #(num_nodes, num_requests) = parse_args()
 
   // Create all node actors and an initial routing table
-  let #(sub_tups, routing_table) = create_actors(num_nodes, num_requests)
+  let #(sub_tups, _routing_table) = create_actors(num_nodes, num_requests)
 
   // Start a background actor that periodically calls stabilize on nodes
   let assert Ok(stabilize_actor) =
-    actor.new(sub_tups)
+    actor.new_with_initialiser(long_wait_time, fn(self_sub: Subject(Int)) {
+      #(self_sub, sub_tups)
+      |> actor.initialised
+      |> actor.returning(self_sub)
+      |> Ok
+    })
     |> actor.on_message(run_periodic_stabilize)
     |> actor.start
-  actor.send(stabilize_actor.data, Nil)
+  actor.send(stabilize_actor.data, 1)
 
   // Start a background actor that periodically calls fix_fingers on nodes
   let assert Ok(fix_fingers_actor) =
-    actor.new(sub_tups)
+    actor.new_with_initialiser(long_wait_time, fn(self_sub: Subject(Int)) {
+      #(self_sub, sub_tups)
+      |> actor.initialised
+      |> actor.returning(self_sub)
+      |> Ok
+    })
     |> actor.on_message(run_periodic_fix_fingers)
     |> actor.start
-  actor.send(fix_fingers_actor.data, Nil)
+  actor.send(fix_fingers_actor.data, 1)
 
   // Keep the main thread alive so background actors continue running
   process.sleep(main_thread_sleep)
+  actor.send(stabilize_actor.data, 0)
+  actor.send(fix_fingers_actor.data, 0)
+  process.sleep(2000)
+  // After stabilization, print successor and predecessor of each node
+  io.println("\n=== Final successor/predecessor list ===")
+  list.each(sub_tups, fn(tup) { actor.send(tup.0, PrintSuccPred) })
+  process.sleep(2000)
+  // give time for async prints
 
-  dict.each(routing_table, fn(key, _) {
-    io.println(
-      "Node id is "
-      <> key
-      <> " in int its "
-      <> key |> int.base_parse(16) |> result.unwrap(0) |> int.to_string,
-    )
-  })
+  // let assert Ok(first) = sub_tups |> list.drop(1) |> list.first
+
+  // echo "Successor of key B1D5781111D84F7B3FE45A0852E59758CD7A87E5 on asking <> "
+  //   <> " is "
+  //   <> actor.call(
+  //     first.0,
+  //     sending: fn(r) {
+  //       FindSuccessor("B1D5781111D84F7B3FE45A0852E59758CD7A87E5", r)
+  //     },
+  //     waiting: 1000,
+  //   ).0
+
+  // dict.each(routing_table, fn(key, _) {
+  //   io.println(
+  //     "Node id is "
+  //     <> key
+  //     <> " in int its "
+  //     <> key |> int.base_parse(16) |> result.unwrap(0) |> int.to_string,
+  //   )
+  // })
 
   Nil
 }
@@ -101,9 +135,6 @@ fn create_actors(
   List(#(Subject(ChordNodeMessage), process.Pid)),
   Dict(String, #(Subject(ChordNodeMessage), process.Pid)),
 ) {
-  // Maximum identifier space for SHA1 (2^160)
-  let max_nodes = int_power(2, 160)
-
   // Build a list of mappings (node_id_hash, #(subject, pid))
   let mapping_list =
     list.range(1, num_nodes)
@@ -123,10 +154,10 @@ fn create_actors(
             node_data: dict.new(),
             num_requests: num_requests,
             successor_id: index_hash,
-            successor_list: [index_hash],
-            finger_list: dict.from_list([#(1, index_hash)]),
+            successor_list: [],
+            finger_list: dict.new(),
             predecessor_id: "",
-            fix_finger_number: 2,
+            fix_finger_number: 1,
           )
           |> actor.initialised
           |> actor.returning(self_sub)
@@ -169,24 +200,23 @@ pub fn chord_node_handler(
       let new_state =
         ChordNodeState(
           ..state,
-          node_data: dict.combine(data, state.node_data, fn(clash1, _) {
+          node_data: dict.combine(state.node_data, data, fn(clash1, _) {
             clash1
           }),
         )
-      echo state.node_data
-      echo new_state.node_data
       actor.continue(new_state)
     }
 
     GetPredecessor(reply_to) -> {
       // Return the predecessor id
-      actor.send(reply_to, state.predecessor_id)
+      actor.send(reply_to, GotPredecessorReply(state.predecessor_id))
       actor.continue(state)
     }
 
     FindSuccessor(id, reply_to) -> {
       // Lookup the successor for the given id and reply with it
-      echo "Running find_successor on node " <> state.node_id
+      echo "Running find_successor on node "
+        <> state.node_id |> string.slice(0, 6)
       actor.send(reply_to, find_successor(id, state))
       actor.continue(state)
     }
@@ -227,137 +257,22 @@ pub fn chord_node_handler(
         ChordNodeState(
           ..state,
           finger_list: new_finger_list,
-          fix_finger_number: { state.fix_finger_number % 160 } + 1,
+          fix_finger_number: { state.fix_finger_number % finger_list_size } + 1,
         )
       actor.continue(new_state)
     }
 
-    Stabilize -> {
-      // Periodic stabilization: verify successor and notify it if necessary
-      echo "Stabilize on actor "
-        <> state.node_id
-        <> " successor is "
-        <> state.successor_id
-        <> " predecessor is "
-        <> state.predecessor_id
-
-      // Check if the successor is alive
-      let successor_alive = is_alive_sub(state.successor_id, state)
-
-      // If successor dead or successor is self, try to find a replacement
-      let result_main = case
-        !successor_alive.0 || state.successor_id == state.node_id
-      {
-        False -> state.successor_id
-        True -> {
-          // Find a live candidate from successor_list
-          let result =
-            list.find_map(state.successor_list, fn(candidate_id) {
-              let candidate_alive = is_alive_sub(candidate_id, state)
-              case candidate_id != state.node_id && candidate_alive.0 {
-                False -> Error(Nil)
-                True -> Ok(candidate_id)
-              }
-            })
-          // In case a live candidate is found, return res, else return self 
-          case result {
-            Ok(res) -> res
-            Error(_) -> state.node_id
-          }
-        }
-      }
-
-      // If we still have a successor candidate, ask that successor for its predecessor
-      let result_main = case result_main != state.node_id && successor_alive.0 {
-        False -> result_main
-        True -> {
-          let successor_alive = is_alive_sub(result_main, state)
-          let successor_predecessor_id =
-            actor.call(
-              successor_alive.1,
-              waiting: medium_wait_time,
-              sending: GetPredecessor,
-            )
-          case successor_predecessor_id != "" {
-            // No predecessor set on the successor
-            False -> result_main
-            // Found predecessor; check whether it's a better successor
-            True -> {
-              let successor_predecessor =
-                is_alive_sub(successor_predecessor_id, state)
-              case
-                successor_predecessor.0
-                && in_range(
-                  successor_predecessor_id,
-                  state.node_id,
-                  result_main,
-                  False,
-                )
-              {
-                False -> result_main
-                True -> successor_predecessor_id
-              }
-            }
-          }
-        }
-      }
-
-      // Rebuild successor_list from the agreed successor
-      let new_successor_list = case result_main != state.node_id {
-        True -> {
-          // Ask the chosen successor for additional successor entries to fill the list
-          let new_successor_list_tup =
-            list.range(1, 5)
-            |> list.map_fold(
-              with: fn(memo, _) {
-                let res =
-                  actor.call(
-                    is_alive_sub(memo, state).1,
-                    waiting: medium_wait_time,
-                    sending: fn(reply_to) {
-                      FindSuccessor(result_main, reply_to)
-                    },
-                  )
-                #(res.0, res.0)
-              },
-              from: result_main,
-            )
-          [result_main, ..new_successor_list_tup.1]
-        }
-        False -> {
-          // No change
-          state.successor_list
-        }
-      }
-
-      // Update finger table entry 1 to point to the successor
-      let new_finger_list = dict.insert(state.finger_list, 1, result_main)
-
-      // Build new state with updated successor, successor_list and finger_list
-      let new_state =
-        ChordNodeState(
-          ..state,
-          successor_id: result_main,
-          successor_list: new_successor_list,
-          finger_list: new_finger_list,
-        )
-
-      // If successor changed and is alive, notify it of this node as potential predecessor
-      let new_successor_node = is_alive_sub(result_main, state)
-      case result_main != state.node_id {
-        True -> actor.send(new_successor_node.1, Notify(state.node_id))
-        _ -> Nil
-      }
-
-      actor.continue(new_state)
-    }
+    Stabilize -> actor.continue(stabilize(state))
 
     // ---------------------------------------------------------------------
     // Data operations
     // ---------------------------------------------------------------------
     // TODO: Replicate to r successors (currently stores to single responsible node)
     Put(data:) -> {
-      echo "Put called on node " <> state.node_id <> " with data " <> data
+      echo "Put called on node "
+        <> state.node_id |> string.slice(0, 6)
+        <> " with data "
+        <> data
       let key = hash_data(data)
       let #(successor_id, _) = find_successor(key, state)
 
@@ -377,16 +292,22 @@ pub fn chord_node_handler(
 
     Get(key:, reply_to:) -> {
       // Retrieve a value for a key. If this node is not responsible, forward
-      echo "Get called on node " <> state.node_id <> " with key " <> key
+      echo "Get called on node "
+        <> state.node_id |> string.slice(0, 6)
+        <> " with key "
+        <> key |> string.slice(0, 6)
       let key_hash = hash_data(key)
       let #(successor_id, hops) = find_successor(key_hash, state)
-      case successor_id == state.node_id {
+      let res = case successor_id == state.node_id {
         False ->
           // Forward call to responsible node synchronously
-          actor.call(
-            is_alive_sub(successor_id, state).1,
-            sending: fn(reply) { Get(key, reply) },
-            waiting: medium_wait_time,
+          #(
+            actor.call(
+              is_alive_sub(successor_id, state).1,
+              sending: fn(reply) { Get(key, reply) },
+              waiting: medium_wait_time,
+            ).0,
+            hops + 1,
           )
 
         True -> {
@@ -396,7 +317,7 @@ pub fn chord_node_handler(
         }
       }
       // Reply default placeholder (original code returned #("", 1) — preserved)
-      actor.send(reply_to, #("", 1))
+      actor.send(reply_to, res)
       actor.continue(state)
     }
 
@@ -411,7 +332,10 @@ pub fn chord_node_handler(
 
         False -> {
           io.println(
-            "Node " <> state.node_id <> " joining n_id: " <> existing_node_id,
+            "Node "
+            <> state.node_id |> string.slice(0, 6)
+            <> " joining n_id: "
+            <> existing_node_id |> string.slice(0, 6),
           )
           let existing_node = is_alive_sub(existing_node_id, state)
 
@@ -436,9 +360,9 @@ pub fn chord_node_handler(
             )
 
           echo "Node "
-            <> state.node_id
+            <> state.node_id |> string.slice(0, 6)
             <> " successor is "
-            <> successor_node_id.0
+            <> successor_node_id.0 |> string.slice(0, 6)
           actor.continue(new_state)
         }
       }
@@ -452,51 +376,97 @@ pub fn chord_node_handler(
       actor.continue(new_state)
     }
 
-    Notify(potential_predecessor_id:) -> {
-      // Successor notifies this node that it might be this node's predecessor.
-      // Update predecessor and transfer any keys that should now belong to it.
-      echo "Notify"
-      let bool =
-        state.predecessor_id == ""
-        || in_range(
-          potential_predecessor_id,
-          state.predecessor_id,
-          state.node_id,
-          False,
-        )
+    Notify(potential_predecessor_id:) ->
+      actor.continue(notify(potential_predecessor_id, state))
 
-      // If the new predecessor should take keys, copy the relevant keys
-      let new_predecessor_and_data = case bool {
-        False -> #(state.predecessor_id, state.node_data)
-        True -> {
-          let copied_keys =
-            copy_keys_in_range(
-              potential_predecessor_id,
-              state.predecessor_id,
-              potential_predecessor_id,
-              state.node_id,
-              state.node_data,
-              state,
-            )
+    PrintSuccPred -> {
+      io.println(
+        "Node "
+        <> state.node_id |> string.slice(0, 6)
+        <> " | successor: "
+        <> state.successor_id |> string.slice(0, 6)
+        <> " | predecessor: "
+        <> case state.predecessor_id {
+          "" -> "(none)"
+          p -> p |> string.slice(0, 6)
+        },
+      )
+      actor.continue(state)
+    }
 
-          // Drop the transferred keys locally
-          let new_node_data = dict.drop(state.node_data, copied_keys)
-
-          #(potential_predecessor_id, new_node_data)
-        }
+    GotPredecessorReply(predecessor_id:) -> {
+      let new_successor_id = case predecessor_id {
+        "" -> state.successor_id
+        _ ->
+          check_predecessor_as_successor(
+            predecessor_id,
+            state.successor_id,
+            state,
+          )
       }
-
-      let #(new_predecessor, new_node_data) = new_predecessor_and_data
-      let new_state =
+      // Rebuild successor list from the chosen successor
+      let new_successor_list = build_successor_list(new_successor_id, state)
+      // Update finger table with new successor
+      let new_finger_list = dict.insert(state.finger_list, 1, new_successor_id)
+      // Notify the new successor of our existence
+      let successor_node = is_alive_sub(new_successor_id, state)
+      actor.send(successor_node.1, Notify(state.node_id))
+      // Return state with updated values
+      actor.continue(
         ChordNodeState(
           ..state,
-          predecessor_id: new_predecessor,
-          node_data: new_node_data,
-        )
-
-      actor.continue(new_state)
+          successor_id: new_successor_id,
+          successor_list: new_successor_list,
+          finger_list: new_finger_list,
+        ),
+      )
     }
   }
+}
+
+pub fn notify(
+  potential_predecessor_id: String,
+  state: ChordNodeState,
+) -> ChordNodeState {
+  echo "Notify on node " <> state.node_id |> string.slice(0, 6)
+  // Successor notifies this node that it might be this node's predecessor.
+  // Update predecessor and transfer any keys that should now belong to it.
+  // If the new predecessor should take keys, copy the relevant keys
+  let new_predecessor_and_data = case
+    state.predecessor_id == ""
+    || in_range(
+      potential_predecessor_id,
+      state.predecessor_id,
+      state.node_id,
+      False,
+    )
+  {
+    False -> #(state.predecessor_id, state.node_data)
+    True -> {
+      let copied_keys =
+        transfer_keys_in_range(
+          potential_predecessor_id,
+          state.predecessor_id,
+          potential_predecessor_id,
+          state.node_id,
+          state.node_data,
+          state,
+        )
+
+      // Drop the transferred keys locally
+      let new_node_data = dict.drop(state.node_data, copied_keys)
+
+      #(potential_predecessor_id, new_node_data)
+    }
+  }
+
+  let #(new_predecessor, new_node_data) = new_predecessor_and_data
+
+  ChordNodeState(
+    ..state,
+    predecessor_id: new_predecessor,
+    node_data: new_node_data,
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +491,7 @@ pub fn find_successor(id: String, state: ChordNodeState) {
             actor.call(
               closest_node.1,
               waiting: medium_wait_time,
-              sending: fn(reply_to) { FindSuccessor(id, reply_to) },
+              sending: fn(r) { FindSuccessor(id, r) },
             )
           #(closest_node_successor.0, closest_node_successor.1 + 1)
         }
@@ -559,7 +529,8 @@ pub fn closest_preceding_node(
 
 pub type ChordNodeMessage {
   Stabilize
-  GetPredecessor(reply_to: Subject(String))
+  GetPredecessor(reply_to: Subject(ChordNodeMessage))
+  GotPredecessorReply(predecessor_id: String)
   FixFingers
   Put(data: String)
   Get(key: String, reply_to: Subject(#(String, Int)))
@@ -567,6 +538,7 @@ pub type ChordNodeMessage {
   Join(existing_node_id: String)
   Notify(potential_predecessor_id: String)
   FindSuccessor(id: String, reply_to: Subject(#(String, Int)))
+  PrintSuccPred
   StoreRoutingTable(
     routing_table: Dict(String, #(Subject(ChordNodeMessage), Pid)),
     reply_to: Subject(Bool),
@@ -595,7 +567,7 @@ pub type ChordNodeState {
 
 /// Copies keys in a given range to another node. Keys are sent but not deleted
 /// here (the caller handles deletion after confirming transfer).
-pub fn copy_keys_in_range(
+pub fn transfer_keys_in_range(
   to_node_id: String,
   from_id: String,
   to_id: String,
@@ -624,6 +596,109 @@ pub fn copy_keys_in_range(
     }
     False -> []
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stabilize node
+// ---------------------------------------------------------------------------
+
+pub fn stabilize(state: ChordNodeState) -> ChordNodeState {
+  // Periodic stabilization: verify successor and notify it if necessary
+  io.println(
+    "Stabilize on actor "
+    <> state.node_id |> string.slice(0, 6)
+    <> " successor is "
+    <> state.successor_id |> string.slice(0, 6)
+    <> " predecessor is "
+    <> state.predecessor_id |> string.slice(0, 6),
+  )
+  // Find the best available successor
+  let new_successor_id = find_best_successor(state)
+
+  actor.send(
+    is_alive_sub(new_successor_id, state).1,
+    GetPredecessor(state.self_subject),
+  )
+
+  ChordNodeState(
+    ..state,
+    successor_id: new_successor_id,
+    successor_list: build_successor_list(new_successor_id, state),
+    finger_list: dict.insert(state.finger_list, 1, new_successor_id),
+  )
+}
+
+fn find_best_successor(state: ChordNodeState) -> String {
+  let successor_alive = is_alive_sub(state.successor_id, state)
+  let is_successor_invalid =
+    !successor_alive.0 || state.successor_id == state.node_id
+
+  case is_successor_invalid {
+    True -> find_successor_replacement(state)
+    False -> state.successor_id
+  }
+}
+
+fn find_successor_replacement(state: ChordNodeState) -> String {
+  // Search successor_list for a live candidate
+  list.find_map(state.successor_list, fn(candidate_id) {
+    case candidate_id == state.node_id {
+      True -> Error(Nil)
+      False ->
+        case is_alive_sub(candidate_id, state).0 {
+          True -> Ok(candidate_id)
+          False -> Error(Nil)
+        }
+    }
+  })
+  |> result.unwrap(state.node_id)
+}
+
+fn check_predecessor_as_successor(
+  predecessor_id: String,
+  current_successor_id: String,
+  state: ChordNodeState,
+) -> String {
+  let predecessor_alive = is_alive_sub(predecessor_id, state)
+  let is_better_successor =
+    predecessor_alive.0
+    && in_range(predecessor_id, state.node_id, current_successor_id, False)
+
+  case is_better_successor {
+    True -> predecessor_id
+    False -> current_successor_id
+  }
+}
+
+fn build_successor_list(
+  successor_id: String,
+  state: ChordNodeState,
+) -> List(String) {
+  // echo "hi"
+  // case successor_id == state.node_id {
+  //   True -> state.successor_list
+  //   False -> {
+  //     let successors =
+  //       list.range(1, successor_list_size)
+  //       |> list.map_fold(from: successor_id, with: fn(current_id, _) {
+  //         echo state.node_id
+  //         let next =
+  //           actor.call(
+  //             is_alive_sub(current_id, state).1,
+  //             waiting: medium_wait_time,
+  //             sending: fn(r) {
+  //               echo current_id
+  //               FindSuccessor(successor_id, r)
+  //             },
+  //           )
+
+  //         #(next.0, next.0)
+  //       })
+  //     echo "hi2"
+  //     [successor_id, ..successors.1]
+  //   }
+  // }
+  [successor_id]
 }
 
 // ---------------------------------------------------------------------------
@@ -678,27 +753,37 @@ pub fn is_alive_sub(
 // ---------------------------------------------------------------------------
 
 /// Send FixFingers to every node periodically. This function loops
-/// recursively to keep running (tail-call style).
+/// recursively to keep running.
 pub fn run_periodic_fix_fingers(
-  state: List(#(Subject(ChordNodeMessage), Pid)),
-  _message: Nil,
-) -> actor.Next(List(#(Subject(ChordNodeMessage), Pid)), Nil) {
-  list.each(state, fn(tup) { actor.send(tup.0, FixFingers) })
-  process.sleep(short_wait_time)
-  let _ = run_periodic_fix_fingers(state, Nil)
-  actor.continue(state)
+  state: #(Subject(Int), List(#(Subject(ChordNodeMessage), Pid))),
+  message: Int,
+) -> actor.Next(#(Subject(Int), List(#(Subject(ChordNodeMessage), Pid))), Int) {
+  case message {
+    0 -> actor.stop()
+    _ -> {
+      list.each(state.1, fn(tup) { actor.send(tup.0, FixFingers) })
+      process.sleep(short_wait_time)
+      actor.send(state.0, 1)
+      actor.continue(state)
+    }
+  }
 }
 
 /// Send Stabilize to every node periodically. This function loops
-/// recursively to keep running (tail-call style).
+/// recursively to keep running.
 pub fn run_periodic_stabilize(
-  state: List(#(Subject(ChordNodeMessage), Pid)),
-  _message: Nil,
-) -> actor.Next(List(#(Subject(ChordNodeMessage), Pid)), Nil) {
-  list.each(state, fn(tup) { actor.send(tup.0, Stabilize) })
-  process.sleep(medium_wait_time)
-  let _ = run_periodic_stabilize(state, Nil)
-  actor.continue(state)
+  state: #(Subject(Int), List(#(Subject(ChordNodeMessage), Pid))),
+  message: Int,
+) -> actor.Next(#(Subject(Int), List(#(Subject(ChordNodeMessage), Pid))), Int) {
+  case message {
+    0 -> actor.stop()
+    _ -> {
+      list.each(state.1, fn(tup) { actor.send(tup.0, Stabilize) })
+      process.sleep(medium_wait_time)
+      actor.send(state.0, 1)
+      actor.continue(state)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -731,96 +816,6 @@ pub fn in_range(
 
     // a == b, the range covers the entire ring
     _ -> True
-  }
-}
-
-/// Variant of in_range using bit_array compare operations (keeps original
-/// logic but uses bit_array decoding and a comparison API).
-pub fn in_range_2(
-  id: String,
-  start: String,
-  end: String,
-  inclusive_upper: Bool,
-) -> Bool {
-  let assert Ok(x) = bit_array.base16_decode(id)
-  let assert Ok(a) = bit_array.base16_decode(start)
-  let assert Ok(b) = bit_array.base16_decode(end)
-  case inclusive_upper {
-    True -> {
-      case bit_array.compare(a, b) {
-        // a < b
-        Lt -> {
-          // a < x
-          case bit_array.compare(a, x) == Lt {
-            True -> {
-              // x <= b
-              case bit_array.compare(x, b) {
-                Lt -> True
-                Eq -> True
-                _ -> False
-              }
-            }
-
-            False -> False
-          }
-        }
-        // a == b
-        Eq -> True
-        // a > b
-        Gt -> {
-          // x > a
-          let pred1 = case bit_array.compare(x, a) == Gt {
-            True -> True
-            False -> False
-          }
-          // x <= b
-          let pred2 = case bit_array.compare(x, b) {
-            Lt -> True
-            Eq -> True
-            Gt -> False
-          }
-          pred1 || pred2
-        }
-      }
-    }
-
-    False -> {
-      case bit_array.compare(a, b) {
-        // a < b
-        Lt -> {
-          // a < x
-          case bit_array.compare(a, x) == Lt {
-            True -> {
-              // x < b
-              case bit_array.compare(x, b) {
-                Lt -> True
-                Eq -> False
-                _ -> False
-              }
-            }
-
-            False -> False
-          }
-        }
-        // a == b
-        Eq -> True
-        // a > b
-        Gt -> {
-          // x > a
-          let pred1 = case bit_array.compare(x, a) == Gt {
-            True -> True
-            False -> False
-          }
-          // x < b
-          let pred2 = case bit_array.compare(x, b) {
-            Lt -> True
-            Eq -> False
-            Gt -> False
-          }
-          pred1 || pred2
-        }
-      }
-    }
   }
 }
 
