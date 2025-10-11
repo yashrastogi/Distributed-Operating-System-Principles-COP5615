@@ -22,15 +22,9 @@ import simplifile.{read as read_file}
 
 const long_wait_time = 2000
 
-const medium_wait_time = 50
-
-const short_wait_time = 50
+const short_wait_time = 20
 
 const finger_list_size = 160
-
-/// How long the main thread sleeps after starting background actors.
-/// This lets the periodic actors run for a while before the program ends.
-const main_thread_sleep = 8000
 
 // ---------------------------------------------------------------------------
 // Entrypoint
@@ -68,10 +62,12 @@ pub fn main() -> Nil {
   actor.send(fix_fingers_actor.data, 1)
 
   // Keep the main thread alive so background actors continue running
-  process.sleep(main_thread_sleep)
+  process.sleep(num_nodes * 400)
+
   actor.send(stabilize_actor.data, 0)
   actor.send(fix_fingers_actor.data, 0)
-  process.sleep(4000)
+  process.sleep(500)
+
   let assert Ok(first) = sub_tups |> list.first
   let assert Ok(f) = read_file("./src/sentences.txt")
   let sentences =
@@ -85,25 +81,51 @@ pub fn main() -> Nil {
   })
 
   io.println("\n=== Initiating numRequests from each node ===")
-  list.index_map(sub_tups, fn(tup, i) {
-    io.println("")
-    list.sample(sentences, num_requests)
-    |> list.each(fn(sentence) {
-      io.println(
-        "Searching data "
-        <> hash_data(sentence)
-        <> " from node "
-        <> int.to_string(i)
-        <> " found at "
-        <> actor.call(
-          tup.0,
-          sending: fn(r) { Get(hash_data(sentence), r, 0) },
-          waiting: long_wait_time,
-        ).0,
-      )
-      process.sleep(100)
+  let hop_data =
+    list.index_map(sub_tups, fn(tup, i) {
+      io.println("")
+      process.sleep(1000)
+      list.sample(sentences, num_requests)
+      |> list.map(fn(sentence) {
+        let res =
+          actor.call(
+            tup.0,
+            sending: fn(r) { Get(hash_data(sentence), r, 0) },
+            waiting: long_wait_time,
+          )
+        io.println(
+          "Searching data with hash "
+          <> hash_data(sentence)
+          <> " from node number "
+          <> int.to_string(i)
+          <> " found at node_id "
+          <> actor.call(
+            tup.0,
+            sending: fn(r) { FindSuccessor(hash_data(sentence), r) },
+            waiting: long_wait_time,
+          ).0
+          <> " data is "
+          <> res.0,
+        )
+        res.1
+      })
     })
-  })
+
+  let hop_data =
+    hop_data
+    |> list.flatten()
+  let total_hops =
+    hop_data
+    |> list.fold(0, fn(acc, el) { acc + el })
+
+  io.println("Hops data: ")
+  echo hop_data
+
+  let avg_hops =
+    int.to_float(total_hops) /. int.to_float({ { hop_data |> list.length } })
+  io.println(
+    "\n\nAverage hops to deliver a message: " <> avg_hops |> float.to_string,
+  )
 
   process.sleep(long_wait_time)
 
@@ -350,7 +372,7 @@ pub fn chord_node_handler(
             actor.call(
               existing_node.1,
               sending: fn(reply_box) { FindSuccessor(state.node_id, reply_box) },
-              waiting: medium_wait_time,
+              waiting: short_wait_time,
             )
 
           let new_state =
@@ -380,6 +402,11 @@ pub fn chord_node_handler(
       let new_state = ChordNodeState(..state, routing_table: routing_table)
       actor.send(reply_to, True)
       actor.continue(new_state)
+    }
+
+    GetNodeSuccessor(reply_to:) -> {
+      actor.send(reply_to, state.successor_id)
+      actor.continue(state)
     }
 
     Notify(potential_predecessor_id:) ->
@@ -496,11 +523,9 @@ pub fn find_successor(id: String, state: ChordNodeState) {
           // Ask the chosen node to find the successor for id
           let closest_node = is_alive_sub(closest_node_id, state)
           let closest_node_successor =
-            actor.call(
-              closest_node.1,
-              waiting: medium_wait_time,
-              sending: fn(r) { FindSuccessor(id, r) },
-            )
+            actor.call(closest_node.1, waiting: short_wait_time, sending: fn(r) {
+              FindSuccessor(id, r)
+            })
           #(closest_node_successor.0, closest_node_successor.1 + 1)
         }
       }
@@ -539,6 +564,7 @@ pub type ChordNodeMessage {
   Stabilize
   GetPredecessor(reply_to: Subject(ChordNodeMessage))
   GotPredecessorReply(predecessor_id: String)
+  GetNodeSuccessor(reply_to: Subject(String))
   FixFingers
   Put(data: String)
   Get(key: String, reply_to: Subject(#(String, Int)), initial_hops: Int)
@@ -682,27 +708,28 @@ fn build_successor_list(
   successor_id: String,
   _state: ChordNodeState,
 ) -> List(String) {
-  // echo "hi"
   // case successor_id == state.node_id {
   //   True -> state.successor_list
   //   False -> {
   //     let successors =
-  //       list.range(1, successor_list_size)
+  //       list.range(1, 5)
   //       |> list.map_fold(from: successor_id, with: fn(current_id, _) {
-  //         echo state.node_id
-  //         let next =
-  //           actor.call(
-  //             is_alive_sub(current_id, state).1,
-  //             waiting: medium_wait_time,
-  //             sending: fn(r) {
-  //               echo current_id
-  //               FindSuccessor(successor_id, r)
-  //             },
-  //           )
-
-  //         #(next.0, next.0)
+  //         case current_id == state.node_id {
+  //           False -> {
+  //             let next =
+  //               actor.call(
+  //                 is_alive_sub(current_id, state).1,
+  //                 waiting: short_wait_time,
+  //                 sending: GetNodeSuccessor,
+  //               )
+  //             process.sleep(1)
+  //             #(next, next)
+  //           }
+  //           True -> {
+  //             #(state.node_id, state.node_id)
+  //           }
+  //         }
   //       })
-  //     echo "hi2"
   //     [successor_id, ..successors.1]
   //   }
   // }
@@ -769,8 +796,11 @@ pub fn run_periodic_fix_fingers(
   case message {
     0 -> actor.stop()
     _ -> {
-      list.each(state.1, fn(tup) { actor.send(tup.0, FixFingers) })
-      process.sleep(short_wait_time)
+      list.each(state.1, fn(tup) {
+        actor.send(tup.0, FixFingers)
+        process.sleep(1)
+      })
+      process.sleep(1)
       actor.send(state.0, 1)
       actor.continue(state)
     }
@@ -786,8 +816,11 @@ pub fn run_periodic_stabilize(
   case message {
     0 -> actor.stop()
     _ -> {
-      list.each(state.1, fn(tup) { actor.send(tup.0, Stabilize) })
-      process.sleep(medium_wait_time)
+      list.each(state.1, fn(tup) {
+        actor.send(tup.0, Stabilize)
+        process.sleep(1)
+      })
+      process.sleep(1)
       actor.send(state.0, 1)
       actor.continue(state)
     }
