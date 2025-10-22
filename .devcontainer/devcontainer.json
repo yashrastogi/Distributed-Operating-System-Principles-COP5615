@@ -1,0 +1,14 @@
+{
+  "name": "Devcontainer",
+  "image": "ghcr.io/gleam-lang/gleam:v1.13.0-erlang",
+  "customizations": {
+    "vscode": {
+      "extensions": ["gleam.gleam"],
+      "settings": {
+        "[gleam]": {
+          "gleam.path": "/usr/bin/gleam"
+        }
+      }
+    }
+  }
+}

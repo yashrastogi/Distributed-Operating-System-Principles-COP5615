@@ -1,6 +1,8 @@
+import gleam/crypto
+import gleam/dict.{type Dict}
+import gleam/option.{type Option}
 import gleam/set.{type Set}
 import gleam/time/timestamp.{type Timestamp}
-import youid/uuid
 
 pub type User {
   User(
@@ -29,7 +31,7 @@ pub type Subreddit {
     name: SubredditId,
     description: String,
     subscribers: Set(Username),
-    posts: List(Post),
+    posts: Dict(PostId, Post),
   )
 }
 
@@ -42,7 +44,7 @@ pub type Post {
     title: String,
     content: String,
     author: Username,
-    comments: List(Comment),
+    comments: Dict(CommentId, Comment),
     upvote: Int,
     downvote: Int,
     timestamp: Timestamp,
@@ -52,8 +54,8 @@ pub type Post {
 pub type Comment {
   Comment(
     id: CommentId,
-    replies: List(Comment),
     content: String,
+    parent_id: Option(CommentId),
     author: Username,
     timestamp: Timestamp,
     upvote: Int,
@@ -62,7 +64,25 @@ pub type Comment {
 }
 
 pub type CommentId =
-  uuid.Uuid
+  Uuid
 
 pub type PostId =
-  uuid.Uuid
+  Uuid
+
+pub type VoteType {
+  Upvote
+  Downvote
+}
+
+pub fn uuid_gen() -> Uuid {
+  let assert <<a:size(48), _:size(4), b:size(12), _:size(2), c:size(62)>> =
+    crypto.strong_random_bytes(16)
+
+  let value = <<a:size(48), 4:size(4), b:size(12), 2:size(2), c:size(62)>>
+
+  Uuid(value: value)
+}
+
+pub opaque type Uuid {
+  Uuid(value: BitArray)
+}
