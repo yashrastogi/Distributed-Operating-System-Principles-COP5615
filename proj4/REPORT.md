@@ -234,15 +234,16 @@ This project successfully implements a distributed Reddit-like engine with a com
 ## 7. Project Structure
 
 ```
-proj4/reddit_engine/
-├── src/
-│   ├── reddit_engine.gleam      # Main engine implementation
-│   ├── client_simulator.gleam   # Client simulator
-│   ├── models.gleam              # Data models (User, Post, Comment, etc.)
-│   └── distr.erl                 # Erlang FFI for distributed operations
-├── gleam.toml                    # Project configuration
-├── manifest.toml                 # Dependency manifest
-└── REPORT.md                     # This report
+proj4/
+├── reddit_engine/
+│   ├── src/
+│   │   ├── reddit_engine.gleam       # Main engine implementation
+│   │   ├── client_simulator.gleam    # Client simulator
+│   │   ├── models.gleam              # Data models (User, Post, Comment, etc.)
+│   │   └── distr.erl                 # Erlang FFI for distributed operations
+│   ├── gleam.toml                    # Project configuration
+│   ├── manifest.toml                 # Dependency manifest
+└── REPORT.md                         # This report
 ```
 
 ## 8. References
