@@ -14,9 +14,6 @@ pub type User {
   )
 }
 
-pub type Username =
-  String
-
 pub type DirectMessage {
   DirectMessage(
     from: Username,
@@ -63,17 +60,6 @@ pub type Comment {
   )
 }
 
-pub type CommentId =
-  Uuid
-
-pub type PostId =
-  Uuid
-
-pub type VoteType {
-  Upvote
-  Downvote
-}
-
 pub fn uuid_gen() -> Uuid {
   let assert <<a:size(48), _:size(4), b:size(12), _:size(2), c:size(62)>> =
     crypto.strong_random_bytes(16)
@@ -86,3 +72,17 @@ pub fn uuid_gen() -> Uuid {
 pub opaque type Uuid {
   Uuid(value: BitArray)
 }
+
+pub type CommentId =
+  Uuid
+
+pub type PostId =
+  Uuid
+
+pub type VoteType {
+  Upvote
+  Downvote
+}
+
+pub type Username =
+  String
