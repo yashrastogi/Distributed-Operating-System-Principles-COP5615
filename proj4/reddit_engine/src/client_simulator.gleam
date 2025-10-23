@@ -7,7 +7,7 @@ import gleam/list
 import models.{type PostId}
 import reddit_engine
 
-const total_users = 1000
+const total_users = 100
 
 // Rank subreddits by expected popularity
 const subreddits_by_rank = [
@@ -179,8 +179,46 @@ fn run_simulation(
   report_membership_distribution(engine_pid, server_node)
 
   io.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  io.println("Engine Performance Metrics")
+  io.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+  report_engine_metrics(engine_pid, server_node)
+
+  io.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
   io.println("Simulation Complete!")
   io.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+}
+
+fn report_engine_metrics(engine_pid: process.Pid, server_node: String) {
+  let reply_sub = process.new_subject()
+  send_message(
+    engine_pid,
+    server_node,
+    reddit_engine.GetEngineMetrics(reply_to: reply_sub),
+  )
+  case process.receive(reply_sub, 1000) {
+    Ok(metrics) -> {
+      io.println("Total Posts Created: " <> int.to_string(metrics.total_posts))
+      io.println(
+        "Total Messages Processed: " <> int.to_string(metrics.total_messages),
+      )
+      io.println(
+        "Total Comments Processed: " <> int.to_string(metrics.total_comments),
+      )
+      io.println(
+        "Total Votes Processed: " <> int.to_string(metrics.total_votes),
+      )
+      io.println(
+        "Posts per Second: " <> float.to_string(metrics.posts_per_second),
+      )
+      io.println(
+        "Messages per Second: " <> float.to_string(metrics.messages_per_second),
+      )
+    }
+    Error(_) -> {
+      io.println("Could not retrieve engine metrics.")
+    }
+  }
 }
 
 fn report_membership_distribution(engine_pid: process.Pid, server_node: String) {

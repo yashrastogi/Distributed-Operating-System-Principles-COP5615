@@ -1,3 +1,4 @@
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/erlang/atom
 import gleam/erlang/charlist.{type Charlist}
@@ -9,6 +10,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/set
+import gleam/time/duration
 import gleam/time/timestamp
 import models.{
   type CommentId, type DirectMessage, type Post, type PostId, type Subreddit,
@@ -30,6 +32,17 @@ pub fn main() -> Nil {
         self_subject: self_sub,
         users: dict.new(),
         subreddits: dict.new(),
+        metrics: PerformanceMetrics(
+          total_users: 0,
+          total_posts: 0,
+          total_comments: 0,
+          total_votes: 0,
+          total_messages: 0,
+          simulation_start_time: timestamp.system_time(),
+          simulation_checkpoint_time: timestamp.system_time(),
+          posts_per_second: 0.0,
+          messages_per_second: 0.0,
+        ),
       )
       |> actor.initialised
       |> actor.returning(self_sub)
@@ -39,6 +52,7 @@ pub fn main() -> Nil {
     |> actor.on_message(engine_message_handler)
     |> actor.start
 
+  process.send(engine_actor.data, RefreshEngineMetrics)
   io.println("✓ Reddit engine actor started")
 
   // Start distributed Erlang with longnames
@@ -75,6 +89,7 @@ pub type EngineState {
     self_subject: process.Subject(EngineMessage),
     users: Dict(Username, User),
     subreddits: Dict(SubredditId, Subreddit),
+    metrics: PerformanceMetrics,
   )
 }
 
@@ -128,6 +143,8 @@ pub type EngineMessage {
     subreddit_id: SubredditId,
     reply_to: process.Subject(Int),
   )
+  GetEngineMetrics(reply_to: process.Subject(PerformanceMetrics))
+  RefreshEngineMetrics
 }
 
 pub fn engine_message_handler(
@@ -196,7 +213,43 @@ pub fn engine_message_handler(
       actor.continue(get_karma(state, sender_username, username, reply_to))
     GetSubredditMemberCount(subreddit_id:, reply_to:) ->
       actor.continue(get_subreddit_member_count(state, subreddit_id, reply_to))
+    GetEngineMetrics(reply_to:) ->
+      actor.continue(get_engine_metrics(state, reply_to))
+    RefreshEngineMetrics -> actor.continue(refresh_engine_metrics(state))
   }
+}
+
+pub fn refresh_engine_metrics(state: EngineState) -> EngineState {
+  let simulation_checkpoint_time = timestamp.system_time()
+  // Update metrics timestamps
+  let updated_metrics =
+    PerformanceMetrics(
+      ..state.metrics,
+      simulation_checkpoint_time: simulation_checkpoint_time,
+      posts_per_second: int.to_float(state.metrics.total_posts)
+        /. duration.to_seconds(timestamp.difference(
+          state.metrics.simulation_start_time,
+          simulation_checkpoint_time,
+        ))
+        |> float.to_precision(3),
+      messages_per_second: int.to_float(state.metrics.total_messages)
+        /. duration.to_seconds(timestamp.difference(
+          state.metrics.simulation_start_time,
+          simulation_checkpoint_time,
+        ))
+        |> float.to_precision(3),
+    )
+  process.send_after(state.self_subject, 2000, RefreshEngineMetrics)
+  EngineState(..state, metrics: updated_metrics)
+}
+
+pub fn get_engine_metrics(
+  state: EngineState,
+  reply_to: process.Subject(PerformanceMetrics),
+) -> EngineState {
+  io.println("Requesting engine performance metrics")
+  process.send(reply_to, state.metrics)
+  state
 }
 
 pub fn get_subreddit_member_count(
@@ -324,6 +377,15 @@ pub fn vote_post(
             ..state,
             subreddits: updated_subreddits,
             users: updated_users,
+            metrics: PerformanceMetrics(
+              ..state.metrics,
+              total_votes: state.metrics.total_votes
+                + bool.lazy_guard(
+                  when: updated_subreddits == state.subreddits,
+                  return: fn() { 0 },
+                  otherwise: fn() { 1 },
+                ),
+            ),
           )
         }
       }
@@ -380,7 +442,19 @@ pub fn create_post_with_reply(
       }
     })
 
-  EngineState(..state, subreddits: updated_subreddits)
+  EngineState(
+    ..state,
+    subreddits: updated_subreddits,
+    metrics: PerformanceMetrics(
+      ..state.metrics,
+      total_posts: state.metrics.total_posts
+        + bool.lazy_guard(
+          when: updated_subreddits == state.subreddits,
+          return: fn() { 0 },
+          otherwise: fn() { 1 },
+        ),
+    ),
+  )
 }
 
 pub fn send_direct_message(
@@ -414,7 +488,19 @@ pub fn send_direct_message(
     }
   }
 
-  EngineState(..state, users: updated_users)
+  EngineState(
+    ..state,
+    users: updated_users,
+    metrics: PerformanceMetrics(
+      ..state.metrics,
+      total_messages: state.metrics.total_messages
+        + bool.lazy_guard(
+          when: updated_users == state.users,
+          return: fn() { 0 },
+          otherwise: fn() { 1 },
+        ),
+    ),
+  )
 }
 
 pub fn get_direct_messages(
@@ -444,8 +530,6 @@ pub fn get_feed(
   username: Username,
   reply_to: process.Subject(List(Post)),
 ) -> EngineState {
-  io.println(username <> " is requesting their feed")
-
   // Get user's subscribed subreddits
   let subscribed_subreddits = case dict.get(state.users, username) {
     Ok(user) -> user.subscribed_subreddits
@@ -466,6 +550,13 @@ pub fn get_feed(
       }
     })
     |> list.flatten
+
+  io.println(
+    username
+    <> " is requesting their feed, sending "
+    <> int.to_string(list.length(feed_posts))
+    <> " posts",
+  )
 
   // Send the aggregated feed to the requesting subject
   process.send(reply_to, feed_posts)
@@ -543,7 +634,19 @@ pub fn comment_on_comment(
       }
     })
 
-  EngineState(..state, subreddits: updated_subreddits)
+  EngineState(
+    ..state,
+    subreddits: updated_subreddits,
+    metrics: PerformanceMetrics(
+      ..state.metrics,
+      total_comments: state.metrics.total_comments
+        + bool.lazy_guard(
+          when: updated_subreddits == state.subreddits,
+          return: fn() { 0 },
+          otherwise: fn() { 1 },
+        ),
+    ),
+  )
 }
 
 pub fn comment_on_post(
@@ -607,7 +710,19 @@ pub fn comment_on_post(
       }
     })
 
-  EngineState(..state, subreddits: updated_subreddits)
+  EngineState(
+    ..state,
+    subreddits: updated_subreddits,
+    metrics: PerformanceMetrics(
+      ..state.metrics,
+      total_comments: state.metrics.total_comments
+        + bool.lazy_guard(
+          when: updated_subreddits == state.subreddits,
+          return: fn() { 0 },
+          otherwise: fn() { 1 },
+        ),
+    ),
+  )
 }
 
 pub fn leave_subreddit(
@@ -797,9 +912,17 @@ pub fn register_user(state: EngineState, username: Username) -> EngineState {
   }
 
   EngineState(
-    self_subject: state.self_subject,
+    ..state,
     users: updated_users,
-    subreddits: state.subreddits,
+    metrics: PerformanceMetrics(
+      ..state.metrics,
+      total_users: state.metrics.total_users
+        + bool.lazy_guard(
+          when: updated_users == state.users,
+          return: fn() { 0 },
+          otherwise: fn() { 1 },
+        ),
+    ),
   )
 }
 
@@ -924,5 +1047,19 @@ pub fn set_cookie(nodename: String, cookie: String) {
   set_cookie_erlang(
     charlist.from_string(nodename),
     charlist.from_string(cookie),
+  )
+}
+
+pub type PerformanceMetrics {
+  PerformanceMetrics(
+    total_users: Int,
+    total_posts: Int,
+    total_comments: Int,
+    total_votes: Int,
+    total_messages: Int,
+    simulation_start_time: timestamp.Timestamp,
+    simulation_checkpoint_time: timestamp.Timestamp,
+    posts_per_second: Float,
+    messages_per_second: Float,
   )
 }
