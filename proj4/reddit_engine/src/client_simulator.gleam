@@ -4,10 +4,12 @@ import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/time/duration
+import gleam/time/timestamp
 import models.{type PostId}
 import reddit_engine
 
-const total_users = 100
+const total_users = 10_000
 
 // Rank subreddits by expected popularity
 const subreddits_by_rank = [
@@ -198,6 +200,15 @@ fn report_engine_metrics(engine_pid: process.Pid, server_node: String) {
   )
   case process.receive(reply_sub, 1000) {
     Ok(metrics) -> {
+      io.println(
+        "Time Elapsed (s): "
+        <> duration.to_seconds(timestamp.difference(
+          metrics.simulation_start_time,
+          metrics.simulation_checkpoint_time,
+        ))
+        |> float.to_precision(2)
+        |> float.to_string,
+      )
       io.println("Total Posts Created: " <> int.to_string(metrics.total_posts))
       io.println(
         "Total Messages Processed: " <> int.to_string(metrics.total_messages),
