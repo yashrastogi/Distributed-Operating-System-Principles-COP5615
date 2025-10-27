@@ -9,7 +9,7 @@ import gleam/time/timestamp
 import models.{type PostId}
 import reddit_engine
 
-const total_users = 10_000
+const total_users = 900_000
 
 // Rank subreddits by expected popularity
 const subreddits_by_rank = [
@@ -244,8 +244,8 @@ fn report_membership_distribution(engine_pid: process.Pid, server_node: String) 
         reply_to: reply_sub,
       ),
     )
-    case process.receive(reply_sub, 1000) {
-      Ok(count) -> {
+    case process.receive_forever(reply_sub) {
+      count -> {
         io.println(
           "Rank "
           <> int.to_string(rank)
@@ -254,9 +254,6 @@ fn report_membership_distribution(engine_pid: process.Pid, server_node: String) 
           <> "\t| Members: "
           <> int.to_string(count),
         )
-      }
-      Error(_) -> {
-        io.println("Subreddit: " <> name <> " | Members: N/A")
       }
     }
   })

@@ -17,10 +17,12 @@ import models.{
   type SubredditId, type User, type Username, type VoteType, Downvote, Upvote,
 }
 
+const log_info = False
+
 pub fn main() -> Nil {
-  io.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-  io.println("       Reddit Engine Starting Up")
-  io.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  printi("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  printi("       Reddit Engine Starting Up")
+  printi("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
   // Create a static name from atom for consistent distributed addressing
   let engine_name = atom_to_name(atom.create("reddit_engine"))
@@ -53,32 +55,32 @@ pub fn main() -> Nil {
     |> actor.start
 
   process.send(engine_actor.data, RefreshEngineMetrics)
-  io.println("✓ Reddit engine actor started")
+  printi("✓ Reddit engine actor started")
 
   // Start distributed Erlang with longnames
   net_kernel_start(charlist.from_string("reddit_engine"))
   set_cookie("reddit_engine", "secret")
-  io.println("✓ Started distributed Erlang node")
+  printi("✓ Started distributed Erlang node")
 
   // Register globally so it's accessible from other nodes
   let global_reg_result = register_global("reddit_engine", engine_actor.pid)
   case global_reg_result {
-    Ok(_) -> io.println("✓ Reddit engine registered globally!")
-    Error(msg) -> io.println("✗ Global registration failed: " <> msg)
+    Ok(_) -> printi("✓ Reddit engine registered globally!")
+    Error(msg) -> printi("✗ Global registration failed: " <> msg)
   }
 
   io.print("\nGlobal names: ")
   echo list_global_names()
 
-  io.println("\nConnected nodes:")
+  printi("\nConnected nodes:")
   echo list_nodes()
 
-  io.println("\nCurrent cookie:")
+  printi("\nCurrent cookie:")
   echo get_cookie_erlang()
 
-  io.println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-  io.println("  Engine ready - waiting for messages")
-  io.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+  printi("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  printi("  Engine ready - waiting for messages")
+  printi("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
   process.sleep_forever()
   Nil
@@ -247,7 +249,7 @@ pub fn get_engine_metrics(
   state: EngineState,
   reply_to: process.Subject(PerformanceMetrics),
 ) -> EngineState {
-  io.println("Requesting engine performance metrics")
+  printi("Requesting engine performance metrics")
   process.send(reply_to, state.metrics)
   state
 }
@@ -257,7 +259,7 @@ pub fn get_subreddit_member_count(
   subreddit_id: SubredditId,
   reply_to: process.Subject(Int),
 ) -> EngineState {
-  io.println("Requesting member count for r/" <> subreddit_id)
+  printi("Requesting member count for r/" <> subreddit_id)
   // Retrieve subreddit and count subscribers
   let member_count = case dict.get(state.subreddits, subreddit_id) {
     Ok(subreddit) -> set.size(subreddit.subscribers)
@@ -273,7 +275,7 @@ pub fn get_karma(
   username: Username,
   reply_to: process.Subject(Int),
 ) -> EngineState {
-  io.println(sender_username <> " is requesting karma for " <> username)
+  printi(sender_username <> " is requesting karma for " <> username)
   // Retrieve user's upvotes and downvotes
   let user_upvotes =
     case dict.get(state.users, username) {
@@ -300,12 +302,12 @@ pub fn vote_post(
   post_id: PostId,
   vote: VoteType,
 ) -> EngineState {
-  io.println(username <> " is voting in r/" <> subreddit_id)
+  printi(username <> " is voting in r/" <> subreddit_id)
 
   // Check if subreddit exists
   case dict.get(state.subreddits, subreddit_id) {
     Error(_) -> {
-      io.println("⚠ Subreddit r/" <> subreddit_id <> " not found for voting")
+      printi("⚠ Subreddit r/" <> subreddit_id <> " not found for voting")
       state
     }
     Ok(subreddit) -> {
@@ -314,7 +316,7 @@ pub fn vote_post(
 
       case post_opt {
         Error(_) -> {
-          io.println("⚠ Post not found in r/" <> subreddit_id <> " for voting")
+          printi("⚠ Post not found in r/" <> subreddit_id <> " for voting")
           state
         }
         Ok(found_post) -> {
@@ -368,7 +370,7 @@ pub fn vote_post(
               })
             }
             Error(_) -> {
-              io.println("⚠ Post author " <> found_post.author <> " not found")
+              printi("⚠ Post author " <> found_post.author <> " not found")
               state.users
             }
           }
@@ -401,7 +403,7 @@ pub fn create_post_with_reply(
   title: String,
   reply_to: process.Subject(PostId),
 ) -> EngineState {
-  io.println(username <> " is creating post in r/" <> subreddit_id)
+  printi(username <> " is creating post in r/" <> subreddit_id)
 
   // Generate a unique ID and create the new post
   let new_post =
@@ -429,7 +431,7 @@ pub fn create_post_with_reply(
             posts: list.prepend(subreddit.posts, new_post),
           )
         None -> {
-          io.println(
+          printi(
             "⚠ Subreddit r/" <> subreddit_id <> " not found for post creation",
           )
           models.Subreddit(
@@ -463,7 +465,7 @@ pub fn send_direct_message(
   to_username: Username,
   content: String,
 ) -> EngineState {
-  io.println(from_username <> " is sending DM to " <> to_username)
+  printi(from_username <> " is sending DM to " <> to_username)
 
   // Create the message with timestamp
   let new_message =
@@ -483,7 +485,7 @@ pub fn send_direct_message(
       })
     }
     Error(_) -> {
-      io.println("⚠ Recipient user " <> to_username <> " not found")
+      printi("⚠ Recipient user " <> to_username <> " not found")
       state.users
     }
   }
@@ -508,13 +510,13 @@ pub fn get_direct_messages(
   username: Username,
   reply_to: process.Subject(List(DirectMessage)),
 ) -> EngineState {
-  io.println(username <> " is fetching their direct messages")
+  printi(username <> " is fetching their direct messages")
 
   // Retrieve user's inbox
   let user_inbox = case dict.get(state.users, username) {
     Ok(user) -> user.inbox
     Error(_) -> {
-      io.println("⚠ User " <> username <> " not found for fetching messages")
+      printi("⚠ User " <> username <> " not found for fetching messages")
       []
     }
   }
@@ -534,7 +536,7 @@ pub fn get_feed(
   let subscribed_subreddits = case dict.get(state.users, username) {
     Ok(user) -> user.subscribed_subreddits
     Error(_) -> {
-      io.println("⚠ User " <> username <> " not found for feed request")
+      printi("⚠ User " <> username <> " not found for feed request")
       set.new()
     }
   }
@@ -551,7 +553,7 @@ pub fn get_feed(
     })
     |> list.flatten
 
-  io.println(
+  printi(
     username
     <> " is requesting their feed, sending "
     <> int.to_string(list.length(feed_posts))
@@ -572,7 +574,7 @@ pub fn comment_on_comment(
   parent_comment_id: CommentId,
   content: String,
 ) -> EngineState {
-  io.println(username <> " is replying to a comment in r/" <> subreddit_id)
+  printi(username <> " is replying to a comment in r/" <> subreddit_id)
 
   // Create nested comment with parent reference
   let new_comment =
@@ -598,7 +600,7 @@ pub fn comment_on_comment(
                 True -> {
                   case dict.has_key(post.comments, parent_comment_id) {
                     False -> {
-                      io.println("⚠ Parent comment not found in post")
+                      printi("⚠ Parent comment not found in post")
                       post
                     }
                     True ->
@@ -618,7 +620,7 @@ pub fn comment_on_comment(
         }
 
         None -> {
-          io.println(
+          printi(
             "⚠ Subreddit r/" <> subreddit_id <> " not found for commenting",
           )
           sub_op
@@ -656,7 +658,7 @@ pub fn comment_on_post(
   post_id: PostId,
   content: String,
 ) -> EngineState {
-  io.println(username <> " is commenting on a post in r/" <> subreddit_id)
+  printi(username <> " is commenting on a post in r/" <> subreddit_id)
 
   // Create top-level comment (no parent)
   let new_comment =
@@ -694,7 +696,7 @@ pub fn comment_on_post(
         }
 
         None -> {
-          io.println(
+          printi(
             "⚠ Subreddit r/" <> subreddit_id <> " not found for commenting",
           )
           sub_op
@@ -730,7 +732,7 @@ pub fn leave_subreddit(
   username: Username,
   subreddit_name: SubredditId,
 ) -> EngineState {
-  io.println(username <> " is leaving subreddit " <> subreddit_name)
+  printi(username <> " is leaving subreddit " <> subreddit_name)
   let updated_users =
     dict.upsert(state.users, username, fn(user_op) {
       case user_op {
@@ -744,9 +746,7 @@ pub fn leave_subreddit(
           )
 
         None -> {
-          io.println(
-            "⚠ User " <> username <> " not found for leaving subreddit",
-          )
+          printi("⚠ User " <> username <> " not found for leaving subreddit")
           user_op
           |> option.unwrap(
             models.User(
@@ -771,9 +771,7 @@ pub fn leave_subreddit(
           )
 
         None -> {
-          io.println(
-            "⚠ Subreddit r/" <> subreddit_name <> " not found for leaving",
-          )
+          printi("⚠ Subreddit r/" <> subreddit_name <> " not found for leaving")
           sub_op
           |> option.unwrap(
             models.Subreddit(
@@ -795,7 +793,7 @@ pub fn join_subreddit(
   username: Username,
   subreddit_name: SubredditId,
 ) -> EngineState {
-  io.println(username <> " is joining r/" <> subreddit_name)
+  printi(username <> " is joining r/" <> subreddit_name)
 
   // Add subreddit to user's subscriptions
   let updated_users =
@@ -811,9 +809,7 @@ pub fn join_subreddit(
           )
 
         None -> {
-          io.println(
-            "⚠ User " <> username <> " not found for joining subreddit",
-          )
+          printi("⚠ User " <> username <> " not found for joining subreddit")
           user_op
           |> option.unwrap(
             models.User(
@@ -839,9 +835,7 @@ pub fn join_subreddit(
           )
 
         None -> {
-          io.println(
-            "⚠ Subreddit r/" <> subreddit_name <> " not found for joining",
-          )
+          printi("⚠ Subreddit r/" <> subreddit_name <> " not found for joining")
           sub_op
           |> option.unwrap(
             models.Subreddit(
@@ -875,12 +869,12 @@ pub fn create_subreddit(
   // Check if subreddit already exists to avoid duplicates
   let updated_subreddits = case dict.get(state.subreddits, name) {
     Ok(_) -> {
-      io.println("⚠ Subreddit r/" <> name <> " already exists")
+      printi("⚠ Subreddit r/" <> name <> " already exists")
       state.subreddits
     }
 
     Error(_) -> {
-      io.println("✓ Created subreddit r/" <> name)
+      printi("✓ Created subreddit r/" <> name)
       dict.insert(state.subreddits, name, new_subreddit)
     }
   }
@@ -902,11 +896,11 @@ pub fn register_user(state: EngineState, username: Username) -> EngineState {
   // Check if user already exists to avoid duplicate registrations
   let updated_users = case dict.has_key(state.users, username) {
     True -> {
-      io.println("⚠ User " <> username <> " already registered")
+      printi("⚠ User " <> username <> " already registered")
       state.users
     }
     False -> {
-      io.println("✓ User " <> username <> " registered successfully")
+      printi("✓ User " <> username <> " registered successfully")
       dict.insert(state.users, username, new_user)
     }
   }
@@ -924,6 +918,14 @@ pub fn register_user(state: EngineState, username: Username) -> EngineState {
         ),
     ),
   )
+}
+
+fn printi(str: String) -> Nil {
+  case log_info {
+    True -> io.println(str)
+    False -> Nil
+  }
+  Nil
 }
 
 // ═══════════════════════════════════════════════════════
